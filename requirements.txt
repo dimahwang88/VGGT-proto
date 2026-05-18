@@ -16,6 +16,17 @@ numpy==1.26.4
 trimesh==4.4.9
 huggingface_hub==0.24.6
 
+# Deps OF vggt itself. vggt is installed with --no-deps (so it can't swap
+# torch), which also skips its other deps — they must be listed here.
+# vggt's requirements.txt is: torch, torchvision, numpy, Pillow,
+# huggingface_hub, einops, safetensors. torch/torchvision are excluded
+# (base image / torchvision==0.19.0 above); numpy/Pillow/huggingface_hub are
+# already pinned above; einops + safetensors are added here. Without einops
+# `import vggt` fails; without safetensors loading the .safetensors weights
+# fails (NameError: load_model_as_safetensor not defined).
+einops==0.8.0
+safetensors==0.4.5
+
 # The official model code is installed separately in the Dockerfile / setup
 # steps with `--no-deps` so it cannot pull a different torch:
 #   pip install --no-deps "git+https://github.com/facebookresearch/vggt.git"
