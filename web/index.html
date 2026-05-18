@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VGGT 3D Reconstruction</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #121316; color: #e6e6e6; }
+  header { padding: 12px 16px; border-bottom: 1px solid #2a2c31; }
+  header h1 { font-size: 16px; margin: 0; }
+  header small { color: #9aa0a6; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 0; height: calc(100vh - 50px); }
+  .panel { padding: 16px; overflow: auto; border-right: 1px solid #2a2c31; }
+  #viewer { position: relative; }
+  #viewer canvas { display: block; }
+  button { background: #2b6cff; color: #fff; border: 0; border-radius: 6px;
+           padding: 8px 14px; cursor: pointer; font-size: 14px; }
+  button:disabled { background: #3a3d44; cursor: not-allowed; }
+  button.secondary { background: #34373d; }
+  input[type=file] { width: 100%; margin: 8px 0 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 12px; }
+  .thumb { position: relative; cursor: pointer; border: 2px solid transparent; border-radius: 4px; overflow: hidden; }
+  .thumb.sel { border-color: #2b6cff; }
+  .thumb img, .thumb canvas { width: 100%; display: block; }
+  .thumb .badge { position: absolute; top: 2px; left: 2px; background: #000a; padding: 0 5px; font-size: 11px; border-radius: 3px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
+  th, td { border: 1px solid #2a2c31; padding: 3px 6px; text-align: right; }
+  th { background: #1c1e22; }
+  #status { margin: 12px 0; color: #9aa0a6; min-height: 18px; }
+  .err { color: #ff6b6b; }
+  details summary { cursor: pointer; margin-top: 12px; }
+  .hint { color: #9aa0a6; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VGGT 3D Reconstruction <small>— cameras · point cloud · point tracking</small></h1>
+</header>
+<main>
+  <section class="panel">
+    <input id="files" type="file" accept="image/*" multiple />
+    <div class="row">
+      <button id="run">Reconstruct</button>
+      <button id="dlGlb" class="secondary" disabled>Download GLB</button>
+      <button id="dlCam" class="secondary" disabled>Cameras JSON</button>
+    </div>
+    <div id="status"></div>
+
+    <details open id="trackBox" hidden>
+      <summary>Point tracking</summary>
+      <p class="hint">Pick a reference frame, click points on it, then Track.</p>
+      <div class="row">
+        <button id="track" disabled>Track clicked points</button>
+        <button id="clearPts" class="secondary" disabled>Clear points</button>
+      </div>
+      <div id="thumbs" class="thumbs"></div>
+    </details>
+
+    <details id="camBox" hidden>
+      <summary>Camera parameters</summary>
+      <div id="cams"></div>
+    </details>
+  </section>
+
+  <section id="viewer"></section>
+</main>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

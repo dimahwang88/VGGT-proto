@@ -1,0 +1,21 @@
+# App dependencies only.
+#
+# torch is intentionally NOT listed: it ships in the base image
+# (runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04) as a CUDA build.
+# Listing it here would let pip replace it with a CPU wheel.
+#
+# torchvision is pinned to the version matched to torch 2.4.0 so a stray
+# resolve does not upgrade/downgrade it.
+torchvision==0.19.0
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pillow==10.4.0
+numpy==1.26.4
+trimesh==4.4.9
+huggingface_hub==0.24.6
+
+# The official model code is installed separately in the Dockerfile / setup
+# steps with `--no-deps` so it cannot pull a different torch:
+#   pip install --no-deps "git+https://github.com/facebookresearch/vggt.git"
