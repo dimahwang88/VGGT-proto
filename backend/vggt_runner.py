@@ -63,6 +63,7 @@ class Scene:
     points_xyz: np.ndarray         # (P, 3) float32
     points_rgb: np.ndarray         # (P, 3) uint8
     frames_png: list[bytes]        # preprocessed frames, what the UI displays/clicks on
+    depth_png: list[bytes]         # per-frame colorized depth maps (same size as frames)
     frame_size: tuple[int, int]    # (height, width) of the preprocessed frames
 
     # GPU state retained for the tracking head (fast path: ref frame == 0)
@@ -81,6 +82,39 @@ def _tensor_to_png(img_chw: torch.Tensor) -> bytes:
     arr = (img_chw.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
     buf = io.BytesIO()
     Image.fromarray(arr).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# Inferno-style colormap anchors (perceptual, dependency-free via np.interp).
+_CMAP_T = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+_CMAP_R = np.array([0, 87, 188, 249, 252])
+_CMAP_G = np.array([0, 16, 55, 142, 255])
+_CMAP_B = np.array([4, 110, 84, 9, 164])
+
+
+def _depth_to_png(depth_hw: np.ndarray, conf_hw: np.ndarray) -> bytes:
+    """(H, W) depth + (H, W) confidence -> colorized PNG bytes.
+
+    Near = warm, far = dark. Robust 2/98 percentile stretch over the
+    confident, finite pixels; invalid pixels render black.
+    """
+    d = depth_hw.astype(np.float64)
+    valid = np.isfinite(d) & (conf_hw > 0)
+    if valid.any():
+        lo, hi = np.percentile(d[valid], [2, 98])
+    else:
+        lo, hi = 0.0, 1.0
+    norm = np.clip((d - lo) / (hi - lo + 1e-6), 0.0, 1.0)
+    t = 1.0 - norm  # invert so closer surfaces are warm/bright
+
+    rgb = np.zeros((*d.shape, 3), dtype=np.uint8)
+    rgb[..., 0] = np.interp(t, _CMAP_T, _CMAP_R)
+    rgb[..., 1] = np.interp(t, _CMAP_T, _CMAP_G)
+    rgb[..., 2] = np.interp(t, _CMAP_T, _CMAP_B)
+    rgb[~valid] = 0
+
+    buf = io.BytesIO()
+    Image.fromarray(rgb).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -111,6 +145,8 @@ def reconstruct(image_paths: list[str]) -> Scene:
     depth_np = depth_map.squeeze(0).float().cpu().numpy()  # (N, H, W, 1)
     conf_np = depth_conf.squeeze(0).float().cpu().numpy()  # (N, H, W)
 
+    depth_png = [_depth_to_png(depth_np[i, :, :, 0], conf_np[i]) for i in range(n)]
+
     world = unproject_depth_map_to_point_map(depth_np, extr, intr)  # (N, H, W, 3)
     colors = (images.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
 
@@ -138,6 +174,7 @@ def reconstruct(image_paths: list[str]) -> Scene:
         points_xyz=pts.astype(np.float32),
         points_rgb=rgb.astype(np.uint8),
         frames_png=frames_png,
+        depth_png=depth_png,
         frame_size=(h, w),
         _tokens=tokens,
         _ps_idx=ps_idx,

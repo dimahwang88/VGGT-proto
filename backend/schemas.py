@@ -20,6 +20,7 @@ class ReconstructResponse(BaseModel):
     cameras: list[Camera]
     pointcloud_url: str
     frame_urls: list[str]
+    depth_urls: list[str]
 
 
 class TrackRequest(BaseModel):

@@ -116,6 +116,7 @@ async def api_reconstruct(images: list[UploadFile] = File(...)) -> ReconstructRe
         cameras=scene.cameras,
         pointcloud_url=f"/api/asset/{sid}.glb",
         frame_urls=[f"/api/asset/{sid}/frame/{i}.png" for i in range(scene.num_images)],
+        depth_urls=[f"/api/asset/{sid}/depth/{i}.png" for i in range(scene.num_images)],
     )
 
 
@@ -130,6 +131,14 @@ async def api_frame(session_id: str, idx: int) -> Response:
     if not (0 <= idx < scene.num_images):
         raise HTTPException(404, "Frame out of range")
     return Response(scene.frames_png[idx], media_type="image/png")
+
+
+@app.get("/api/asset/{session_id}/depth/{idx}.png")
+async def api_depth(session_id: str, idx: int) -> Response:
+    scene = _get(session_id).scene
+    if not (0 <= idx < scene.num_images):
+        raise HTTPException(404, "Frame out of range")
+    return Response(scene.depth_png[idx], media_type="image/png")
 
 
 @app.post("/api/track", response_model=TrackResponse)

@@ -6,7 +6,9 @@ const viewer = new Viewer($("viewer"));
 const state = {
   session: null,
   frameUrls: [],
-  frameImgs: [],   // loaded HTMLImageElement per frame
+  frameImgs: [],   // loaded HTMLImageElement per frame (RGB)
+  depthImgs: [],   // loaded HTMLImageElement per frame (colorized depth)
+  showDepth: false,
   fw: 0,
   fh: 0,
   cameras: [],
@@ -23,6 +25,11 @@ function setStatus(msg, isErr = false) {
 
 $("run").addEventListener("click", reconstruct);
 $("flip").addEventListener("click", () => viewer.flipVertical());
+$("depthToggle").addEventListener("click", () => {
+  state.showDepth = !state.showDepth;
+  $("depthToggle").textContent = `Depth: ${state.showDepth ? "on" : "off"}`;
+  renderTracking();
+});
 $("track").addEventListener("click", runTracking);
 $("clearPts").addEventListener("click", () => {
   state.queryPts = [];
@@ -66,6 +73,8 @@ async function reconstruct() {
     state.refIdx = 0;
     state.queryPts = [];
     state.tracks = null;
+    state.showDepth = false;
+    $("depthToggle").textContent = "Depth: off";
 
     viewer.clear();
     viewer.setUpFromCameras(data.cameras);   // set orbit up-axis before framing
@@ -76,13 +85,17 @@ async function reconstruct() {
     });
     viewer.onCameraClick = (i) => selectCamera(i);
 
-    await loadFrameImages();
+    [state.frameImgs, state.depthImgs] = await Promise.all([
+      loadImages(data.frame_urls),
+      loadImages(data.depth_urls),
+    ]);
     $("trackBox").hidden = false;   // must be visible so #refCanvas can measure its width
     renderTracking();
     renderCameraTable();
 
     $("camBox").hidden = false;
     $("flip").disabled = false;
+    $("depthToggle").disabled = false;
     $("dlGlb").disabled = false;
     $("dlCam").disabled = false;
     $("track").disabled = false;
@@ -95,19 +108,25 @@ async function reconstruct() {
   }
 }
 
-function loadFrameImages() {
+function loadImages(urls) {
   return Promise.all(
-    state.frameUrls.map(
+    urls.map(
       (url) =>
         new Promise((resolve) => {
           const img = new Image();
           img.onload = () => resolve(img);
+          img.onerror = () => resolve(img);
           img.src = url;
         })
     )
-  ).then((imgs) => {
-    state.frameImgs = imgs;
-  });
+  );
+}
+
+// The image to display for frame i — depth map or RGB per the toggle.
+function frameImage(i) {
+  return state.showDepth && state.depthImgs[i]
+    ? state.depthImgs[i]
+    : state.frameImgs[i];
 }
 
 const COLORS = ["#ff5252", "#4caf50", "#ffc107", "#e040fb", "#00e5ff", "#ff9100"];
@@ -133,7 +152,7 @@ function selectCamera(i) {
 function drawThumbGrid() {
   const wrap = $("thumbs");
   wrap.innerHTML = "";
-  state.frameImgs.forEach((img, i) => {
+  state.frameImgs.forEach((_, i) => {
     const div = document.createElement("div");
     div.className = "thumb" + (i === state.refIdx ? " sel" : "");
 
@@ -142,7 +161,7 @@ function drawThumbGrid() {
     const dispH = Math.round((state.fh / state.fw) * dispW);
     cv.width = dispW;
     cv.height = dispH;
-    cv.getContext("2d").drawImage(img, 0, 0, dispW, dispH);
+    cv.getContext("2d").drawImage(frameImage(i), 0, 0, dispW, dispH);
 
     const badge = document.createElement("span");
     badge.className = "badge";
@@ -159,7 +178,7 @@ function drawThumbGrid() {
 // Enlarged reference frame — where the user clicks query points.
 function drawRefCanvas() {
   const cv = $("refCanvas");
-  const img = state.frameImgs[state.refIdx];
+  const img = frameImage(state.refIdx);
   if (!img) return;
 
   const dispW = cv.clientWidth || cv.parentElement.clientWidth || 300;
@@ -216,9 +235,9 @@ function drawTrackStrip() {
   const sx = fdW / state.fw;
   const sy = H / state.fh;
 
-  imgs.forEach((img, i) => {
+  imgs.forEach((_, i) => {
     const ox = i * fdW;
-    ctx.drawImage(img, ox, 0, fdW, H);
+    ctx.drawImage(frameImage(i), ox, 0, fdW, H);
     ctx.fillStyle = "#000a";
     ctx.fillRect(ox + 2, 2, 26, 16);
     ctx.fillStyle = "#fff";
