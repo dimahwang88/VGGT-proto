@@ -8,6 +8,7 @@ memory with a TTL and a hard cap (each retains GPU tensors for tracking).
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import tempfile
 import time
@@ -22,8 +23,13 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from .convert import build_glb
-from .schemas import ReconstructResponse, TrackRequest, TrackResponse
-from .vggt_runner import Scene, reconstruct, track
+from .schemas import (
+    IntrospectResponse,
+    ReconstructResponse,
+    TrackRequest,
+    TrackResponse,
+)
+from .vggt_runner import Scene, introspect, reconstruct, track
 
 MAX_IMAGES = 50          # UI/VRAM guard (24 GB RTX 4090, 518px frames)
 MIN_IMAGES = 1
@@ -157,6 +163,44 @@ async def api_track(req: TrackRequest) -> TrackResponse:
                 raise HTTPException(507, "GPU out of memory") from exc
             raise HTTPException(500, f"Tracking failed: {exc}") from exc
     return TrackResponse(tracks=tracks)
+
+
+@app.get("/api/introspect/{session_id}", response_model=IntrospectResponse)
+async def api_introspect(
+    session_id: str,
+    frame: int = 0,
+    layer: int = 0,
+    qx: float = 0.0,
+    qy: float = 0.0,
+) -> IntrospectResponse:
+    """Learn-mode: token-norm + query-similarity heatmaps on the retained
+    aggregator tokens (no model re-run)."""
+    scene = _get(session_id).scene
+    async with _gpu_lock:
+        try:
+            data = await asyncio.to_thread(
+                introspect, scene, frame, layer, qx, qy
+            )
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower():
+                raise HTTPException(507, "GPU out of memory") from exc
+            raise HTTPException(500, f"Introspection failed: {exc}") from exc
+
+    def uri(b: bytes) -> str:
+        return "data:image/png;base64," + base64.b64encode(b).decode()
+
+    return IntrospectResponse(
+        layer=data["layer"],
+        num_layers=data["num_layers"],
+        layer_kind=data["layer_kind"],
+        grid=data["grid"],
+        frame=data["frame"],
+        num_frames=data["num_frames"],
+        query_patch=data["query_patch"],
+        cross_frame_mix=data["cross_frame_mix"],
+        tokennorm_png=uri(data["tokennorm_png"]),
+        attention_png=uri(data["attention_png"]),
+    )
 
 
 @app.get("/healthz")

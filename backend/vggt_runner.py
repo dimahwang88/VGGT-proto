@@ -92,6 +92,24 @@ _CMAP_G = np.array([0, 16, 55, 142, 255])
 _CMAP_B = np.array([4, 110, 84, 9, 164])
 
 
+def _array_to_png(arr01: np.ndarray, mask: np.ndarray | None = None) -> bytes:
+    """(H, W) array already in [0,1] -> inferno-colorized PNG bytes.
+
+    Shared by the depth view and the Learn-mode introspection heatmaps so
+    there is a single colormap implementation.
+    """
+    t = np.clip(arr01, 0.0, 1.0)
+    rgb = np.zeros((*t.shape, 3), dtype=np.uint8)
+    rgb[..., 0] = np.interp(t, _CMAP_T, _CMAP_R)
+    rgb[..., 1] = np.interp(t, _CMAP_T, _CMAP_G)
+    rgb[..., 2] = np.interp(t, _CMAP_T, _CMAP_B)
+    if mask is not None:
+        rgb[~mask] = 0
+    buf = io.BytesIO()
+    Image.fromarray(rgb).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _depth_to_png(depth_hw: np.ndarray, conf_hw: np.ndarray) -> bytes:
     """(H, W) depth + (H, W) confidence -> colorized PNG bytes.
 
@@ -105,17 +123,7 @@ def _depth_to_png(depth_hw: np.ndarray, conf_hw: np.ndarray) -> bytes:
     else:
         lo, hi = 0.0, 1.0
     norm = np.clip((d - lo) / (hi - lo + 1e-6), 0.0, 1.0)
-    t = 1.0 - norm  # invert so closer surfaces are warm/bright
-
-    rgb = np.zeros((*d.shape, 3), dtype=np.uint8)
-    rgb[..., 0] = np.interp(t, _CMAP_T, _CMAP_R)
-    rgb[..., 1] = np.interp(t, _CMAP_T, _CMAP_G)
-    rgb[..., 2] = np.interp(t, _CMAP_T, _CMAP_B)
-    rgb[~valid] = 0
-
-    buf = io.BytesIO()
-    Image.fromarray(rgb).save(buf, format="PNG")
-    return buf.getvalue()
+    return _array_to_png(1.0 - norm, valid)  # invert: closer = warm/bright
 
 
 def reconstruct(image_paths: list[str]) -> Scene:
@@ -231,3 +239,87 @@ def track(scene: Scene, ref_idx: int, query_xy: list[list[float]]) -> list[list[
             per_frame.append([float(x), float(y), float(visible)])
         out.append(per_frame)
     return out
+
+
+# DINOv2 ViT patch size used by the VGGT backbone.
+_PATCH = 14
+
+
+def _patch_grid(h: int, w: int, n_patch: int) -> tuple[int, int]:
+    """Patch-token grid (rows, cols). Prefers H/14 x W/14; falls back to the
+    aspect-closest integer factorization if the token count disagrees."""
+    gh, gw = h // _PATCH, w // _PATCH
+    if gh * gw == n_patch:
+        return gh, gw
+    best = (1, n_patch)
+    for r in range(1, int(n_patch ** 0.5) + 1):
+        if n_patch % r == 0:
+            best = (r, n_patch // r)
+    return best
+
+
+def introspect(scene: Scene, frame: int, layer: int, qx: float, qy: float) -> dict:
+    """Teaching introspection on the *retained aggregator tokens* (no model
+    re-run, so it's cheap and can't OOM).
+
+    For the chosen captured layer and frame returns, as colorized PNGs:
+      * token-norm heatmap (per-patch L2 norm of the residual stream), and
+      * a query-patch cosine-similarity map over that frame's patches
+        (a robust, honest proxy for "what this patch attends to" — VGGT's
+        SDPA attention weights aren't exposed without patching the model).
+    Plus ``cross_frame_mix``: the query token's mean similarity to every
+    frame's patches — this rises across layers as global attention fuses
+    views, which is the paper's core idea made visible.
+    """
+    toks = scene._tokens
+    if toks is None:
+        raise RuntimeError("Scene tokens were released — reconstruct again.")
+
+    n_layers = len(toks)
+    layer = max(0, min(int(layer), n_layers - 1))
+    t = toks[layer]
+    if t.dim() != 4:
+        raise RuntimeError(
+            f"Unexpected token shape {tuple(t.shape)} (expected (B,N,S,C))."
+        )
+    _, n_img, s, _ = t.shape
+    frame = max(0, min(int(frame), n_img - 1))
+    ps = int(scene._ps_idx)
+
+    patch = t[0, :, ps:, :].float()             # (N, P, C) — kept on device
+    n_p = patch.shape[1]
+    h, w = scene.frame_size
+    gh, gw = _patch_grid(h, w, n_p)
+
+    # Token-norm heatmap for the chosen frame.
+    norms = patch[frame].norm(dim=-1)           # (P,)
+    norms = (norms - norms.min()) / (norms.max() - norms.min() + 1e-6)
+    tokennorm_png = _array_to_png(norms.reshape(gh, gw).cpu().numpy())
+
+    # Query patch (pixel -> patch cell) cosine-similarity map.
+    qcol = min(gw - 1, max(0, int(qx // _PATCH)))
+    qrow = min(gh - 1, max(0, int(qy // _PATCH)))
+    qidx = qrow * gw + qcol
+    unit = patch / (patch.norm(dim=-1, keepdim=True) + 1e-6)   # (N, P, C)
+    qvec = unit[frame, qidx]                                   # (C,)
+    sim = unit[frame] @ qvec                                   # (P,) in [-1,1]
+    attention_png = _array_to_png(
+        ((sim + 1.0) / 2.0).reshape(gh, gw).cpu().numpy()
+    )
+
+    # Cross-frame mixing: mean similarity of the query token to each frame.
+    mix = (unit @ qvec).mean(dim=1)             # (N,)
+    cross = [float(v) for v in mix.cpu().numpy()]
+
+    return {
+        "layer": layer,
+        "num_layers": n_layers,
+        "layer_kind": "frame-wise" if layer % 2 == 0 else "global",
+        "grid": [gh, gw],
+        "frame": frame,
+        "num_frames": n_img,
+        "query_patch": [qrow, qcol],
+        "tokennorm_png": tokennorm_png,
+        "attention_png": attention_png,
+        "cross_frame_mix": cross,
+    }

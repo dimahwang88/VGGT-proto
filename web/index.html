@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>VGGT 3D Reconstruction</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -40,6 +41,30 @@
   .err { color: #ff6b6b; }
   details summary { cursor: pointer; margin-top: 12px; }
   .hint { color: #9aa0a6; font-size: 12px; }
+  /* Learn mode */
+  #learnBox .tabs { display: flex; flex-direction: row; gap: 4px; margin: 10px 0; flex-wrap: wrap; }
+  #learnBox .tabs button { padding: 5px 9px; font-size: 12px; }
+  #learnBox .tabs button.active { background: #2b6cff; }
+  #learnBox .tabs button:not(.active) { background: #34373d; }
+  .learn-sec { display: none; }
+  .learn-sec.active { display: block; }
+  #archGraph { background: #1c1e22; border-radius: 6px; padding: 8px; overflow-x: auto; }
+  #archGraph .node rect, #archGraph .node polygon { cursor: pointer; }
+  #archInfo, #trainNotes, #geomMath { background: #1c1e22; border-radius: 6px;
+            padding: 10px; margin-top: 8px; font-size: 13px; }
+  #archInfo code, #trainNotes code, .learn-sec code { background: #000; padding: 1px 5px;
+            border-radius: 3px; font-size: 12px; color: #9ad; }
+  .heatRow { display: flex; flex-direction: row; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+  .heatCell { text-align: center; font-size: 11px; color: #9aa0a6; }
+  .heatCell canvas, .heatCell img { width: 150px; image-rendering: pixelated;
+            border: 1px solid #2a2c31; border-radius: 4px; display: block; }
+  #attnPick { width: 100%; display: block; cursor: crosshair;
+            border: 1px solid #2a2c31; border-radius: 4px; margin-top: 6px; }
+  .slider { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
+  .slider input[type=range] { flex: 1; }
+  .slider .val { width: 56px; text-align: right; color: #9ad; }
+  .katex-display { margin: 8px 0 !important; font-size: 0.95em; }
+  #dataMix { max-width: 100%; }
 </style>
 </head>
 <body>
@@ -73,6 +98,60 @@
       <summary>Camera parameters</summary>
       <div id="cams"></div>
     </details>
+
+    <details id="learnBox" hidden>
+      <summary>Learn VGGT</summary>
+      <p class="hint">Architecture, attention, the math, and the training
+        recipe — illustrated on your loaded scene.</p>
+      <div class="tabs">
+        <button data-sec="arch" class="active">Architecture</button>
+        <button data-sec="attn">Attention</button>
+        <button data-sec="geom">Geometry math</button>
+        <button data-sec="train">Training</button>
+      </div>
+
+      <div id="sec-arch" class="learn-sec active">
+        <div id="archGraph">loading…</div>
+        <div id="archInfo">Click a block in the diagram.</div>
+      </div>
+
+      <div id="sec-attn" class="learn-sec">
+        <p class="hint">Click the frame to pick a query patch, then step
+          layers to watch frame-wise vs global structure emerge.</p>
+        <canvas id="attnPick"></canvas>
+        <div class="slider"><span>Frame</span>
+          <input id="attnFrame" type="range" min="0" max="0" value="0" />
+          <span class="val" id="attnFrameV">0</span></div>
+        <div class="slider"><span>Layer</span>
+          <input id="attnLayer" type="range" min="0" max="0" value="0" />
+          <span class="val" id="attnLayerV">0</span></div>
+        <div id="attnKind" class="hint"></div>
+        <div class="heatRow">
+          <div class="heatCell">query similarity<br /><img id="attnSim" alt="" /></div>
+          <div class="heatCell">token norm<br /><img id="attnNorm" alt="" /></div>
+        </div>
+        <div class="heatCell" style="margin-top:8px">cross-frame mixing
+          <br /><canvas id="attnMix" width="280" height="90"></canvas></div>
+        <p class="hint" id="attnNote"></p>
+      </div>
+
+      <div id="sec-geom" class="learn-sec">
+        <div id="geomMath"></div>
+        <div class="slider"><span>FOV°</span>
+          <input id="gFov" type="range" min="20" max="120" value="60" />
+          <span class="val" id="gFovV">60</span></div>
+        <div class="slider"><span>Depth</span>
+          <input id="gDepth" type="range" min="1" max="100" value="30" />
+          <span class="val" id="gDepthV">—</span></div>
+        <p class="hint">Drives a teaching frustum + principal ray on the
+          selected camera in the 3D view.</p>
+      </div>
+
+      <div id="sec-train" class="learn-sec">
+        <canvas id="dataMix" height="220"></canvas>
+        <div id="trainNotes"></div>
+      </div>
+    </details>
   </section>
 
   <section id="viewer"></section>
@@ -85,10 +164,13 @@
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "mermaid": "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.esm.min.mjs",
+    "katex": "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.mjs",
+    "chart.js/auto": "https://cdn.jsdelivr.net/npm/chart.js@4.4.3/auto/auto.js"
   }
 }
 </script>
-<script type="module" src="/app.js?v=5"></script>
+<script type="module" src="/app.js?v=6"></script>
 </body>
 </html>

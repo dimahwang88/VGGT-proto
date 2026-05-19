@@ -1,4 +1,5 @@
-import { Viewer } from "/viewer.js?v=4";
+import { Viewer } from "/viewer.js?v=5";
+import { initLearn } from "/learn.js?v=1";
 
 const $ = (id) => document.getElementById(id);
 const viewer = new Viewer($("viewer"));
@@ -94,6 +95,7 @@ async function reconstruct() {
     renderCameraTable();
 
     $("camBox").hidden = false;
+    initLearn(state, viewer);
     $("flip").disabled = false;
     $("depthToggle").disabled = false;
     $("dlGlb").disabled = false;

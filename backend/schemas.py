@@ -32,3 +32,16 @@ class TrackRequest(BaseModel):
 class TrackResponse(BaseModel):
     # tracks[q] = [[x, y, visible(0/1)], ... one entry per frame]
     tracks: list[list[list[float]]]
+
+
+class IntrospectResponse(BaseModel):
+    layer: int
+    num_layers: int
+    layer_kind: str                 # heuristic: "frame-wise" / "global"
+    grid: list[int]                 # [rows, cols] of the patch-token grid
+    frame: int
+    num_frames: int
+    query_patch: list[int]          # [row, col] of the picked patch
+    cross_frame_mix: list[float]    # query-token mean similarity per frame
+    tokennorm_png: str              # data URI (inferno heatmap)
+    attention_png: str              # data URI (inferno heatmap)

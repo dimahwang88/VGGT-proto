@@ -184,6 +184,54 @@ export class Viewer {
     this.selected = idx;
   }
 
+  // Learn-mode geometry teaching overlay: an adjustable-FOV frustum + the
+  // principal-ray and its unprojected point at `depth`, for one real camera.
+  // mat4: cam_to_world (row-major 4x4); w,h: frame px; fovDeg: horizontal FOV.
+  setTeachingOverlay({ mat4, w, h, fovDeg, depth }) {
+    if (!this._teach) this._teach = new THREE.Group();
+    if (this._teach.parent !== this.root) this.root.add(this._teach);
+    this._teach.clear();
+
+    const m = new THREE.Matrix4().set(...mat4.flat());
+    const fx = w / 2 / Math.tan(THREE.MathUtils.degToRad(fovDeg) / 2);
+    const fy = fx;
+    const cx = w / 2, cy = h / 2;
+    const o = new THREE.Vector3().setFromMatrixPosition(m);
+    const at = (px, py, d) =>
+      new THREE.Vector3(((px - cx) / fx) * d, ((py - cy) / fy) * d, d).applyMatrix4(m);
+
+    const c = [at(0, 0, depth), at(w, 0, depth), at(w, h, depth), at(0, h, depth)];
+    const fr = [
+      o, c[0], o, c[1], o, c[2], o, c[3],
+      c[0], c[1], c[1], c[2], c[2], c[3], c[3], c[0],
+    ];
+    this._teach.add(
+      new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(fr),
+        new THREE.LineBasicMaterial({ color: 0x00e5ff })
+      )
+    );
+
+    const hit = at(cx, cy, depth);
+    this._teach.add(
+      new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([o, hit]),
+        new THREE.LineBasicMaterial({ color: 0xffd400 })
+      )
+    );
+    const r = Math.max(o.distanceTo(this.controls.target) * 0.01, 1e-3);
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(r, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffd400 })
+    );
+    dot.position.copy(hit);
+    this._teach.add(dot);
+  }
+
+  clearTeaching() {
+    if (this._teach) this._teach.clear();
+  }
+
   // VGGT cameras are OpenCV convention: cam_to_world column 1 is the camera's
   // local +Y (image-down) axis in world space, so world-up ≈ mean of the
   // negated column-1 vectors. Used as the OrbitControls azimuth axis so
