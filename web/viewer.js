@@ -8,6 +8,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
+const DEFAULT_COLOR = 0x2b6cff;
+const HILITE_COLOR = 0xff9100;
+
 export class Viewer {
   constructor(container) {
     this.container = container;
@@ -26,9 +29,44 @@ export class Viewer {
     this.root = new THREE.Group();
     this.scene.add(this.root);
 
+    this.cameras = [];          // [{ group, line }] per camera, index-aligned
+    this.selected = -1;
+    this.onCameraClick = null;  // (idx) => void
+    this.raycaster = new THREE.Raycaster();
+
+    // Distinguish a click-to-select from an OrbitControls drag.
+    let down = null;
+    const el = this.renderer.domElement;
+    el.addEventListener("pointerdown", (e) => (down = [e.clientX, e.clientY]));
+    el.addEventListener("click", (e) => {
+      if (!down) return;
+      const moved = Math.hypot(e.clientX - down[0], e.clientY - down[1]);
+      down = null;
+      if (moved > 5) return;            // it was an orbit drag, not a pick
+      this._pickCamera(e);
+    });
+
     this._resize();
     window.addEventListener("resize", () => this._resize());
     this._animate();
+  }
+
+  _pickCamera(e) {
+    if (!this.cameras.length) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const hits = this.raycaster.intersectObjects(
+      this.cameras.map((c) => c.line),
+      false
+    );
+    if (!hits.length) return;
+    const idx = hits[0].object.userData.cameraIndex;
+    this.highlightCamera(idx);
+    this.onCameraClick?.(idx);
   }
 
   _resize() {
@@ -47,6 +85,8 @@ export class Viewer {
 
   clear() {
     this.root.clear();
+    this.cameras = [];
+    this.selected = -1;
   }
 
   // Manual 180° pitch flip (y→-y, z→-z): a true vertical flip with no
@@ -70,8 +110,9 @@ export class Viewer {
     this._frameToContent();
   }
 
-  // mat4: row-major 4x4 camera-to-world; intr: 3x3; w,h: frame pixels.
-  addFrustum(mat4, intr, w, h, scale) {
+  // idx: camera index; mat4: row-major 4x4 camera-to-world; intr: 3x3;
+  // w,h: frame pixels. Builds frustum + RGB orientation axes + index label.
+  addCamera(idx, mat4, intr, w, h, scale) {
     const m = new THREE.Matrix4().set(...mat4.flat());
     const fx = intr[0][0], fy = intr[1][1], cx = intr[0][2], cy = intr[1][2];
     const d = scale;
@@ -85,7 +126,58 @@ export class Viewer {
       c[0], c[1], c[1], c[2], c[2], c[3], c[3], c[0],
     ];
     const g = new THREE.BufferGeometry().setFromPoints(pts);
-    this.root.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x2b6cff })));
+    const line = new THREE.LineSegments(
+      g,
+      new THREE.LineBasicMaterial({ color: DEFAULT_COLOR })
+    );
+    line.userData.cameraIndex = idx;
+
+    // RGB triad showing camera orientation (extrinsic rotation).
+    const xa = new THREE.Vector3(), ya = new THREE.Vector3(), za = new THREE.Vector3();
+    m.extractBasis(xa, ya, za);
+    const axis = (dir, color) => {
+      const end = o.clone().add(dir.clone().normalize().multiplyScalar(scale));
+      const ag = new THREE.BufferGeometry().setFromPoints([o, end]);
+      return new THREE.Line(ag, new THREE.LineBasicMaterial({ color }));
+    };
+
+    const label = this._makeLabelSprite(`#${idx}`, scale);
+    label.position.copy(o);
+
+    const group = new THREE.Group();
+    group.add(line, axis(xa, 0xff3b30), axis(ya, 0x34c759), axis(za, 0x0a84ff), label);
+    this.root.add(group);
+    this.cameras.push({ group, line });
+  }
+
+  _makeLabelSprite(text, scale) {
+    const cv = document.createElement("canvas");
+    cv.width = 128;
+    cv.height = 64;
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.beginPath();
+    ctx.roundRect(4, 14, 120, 36, 8);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 28px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, 64, 33);
+
+    const tex = new THREE.CanvasTexture(cv);
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: tex, depthTest: false })
+    );
+    sprite.scale.set(scale * 1.8, scale * 0.9, 1);
+    return sprite;
+  }
+
+  highlightCamera(idx) {
+    this.cameras.forEach((c, i) => {
+      c.line.material.color.setHex(i === idx ? HILITE_COLOR : DEFAULT_COLOR);
+    });
+    this.selected = idx;
   }
 
   _frameToContent() {
@@ -95,6 +187,7 @@ export class Viewer {
     const r = box.getSize(new THREE.Vector3()).length() * 0.5 || 1;
     this.controls.target.copy(c);
     this.camera.position.copy(c).add(new THREE.Vector3(0, 0, r * 2.2));
+    this.raycaster.params.Line.threshold = r * 0.02;
     this.camera.near = r / 100;
     this.camera.far = r * 100;
     this.camera.updateProjectionMatrix();

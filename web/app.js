@@ -1,4 +1,4 @@
-import { Viewer } from "/viewer.js?v=2";
+import { Viewer } from "/viewer.js?v=3";
 
 const $ = (id) => document.getElementById(id);
 const viewer = new Viewer($("viewer"));
@@ -70,9 +70,10 @@ async function reconstruct() {
     viewer.clear();
     await viewer.loadPointCloud(data.pointcloud_url);
     const scale = viewer.frustumScale(data.cameras);
-    for (const cam of data.cameras) {
-      viewer.addFrustum(cam.cam_to_world, cam.intrinsic, state.fw, state.fh, scale);
-    }
+    data.cameras.forEach((cam, i) => {
+      viewer.addCamera(i, cam.cam_to_world, cam.intrinsic, state.fw, state.fh, scale);
+    });
+    viewer.onCameraClick = (i) => selectCamera(i);
 
     await loadFrameImages();
     $("trackBox").hidden = false;   // must be visible so #refCanvas can measure its width
@@ -116,6 +117,17 @@ function renderTracking() {
   drawTrackStrip();
 }
 
+// Single source of truth for "which camera/frame is active": keeps the 3D
+// frustum highlight, the thumbnail grid, and the reference image in sync.
+function selectCamera(i) {
+  if (i === state.refIdx) return;
+  state.refIdx = i;
+  state.queryPts = [];
+  state.tracks = null;
+  renderTracking();
+  viewer.highlightCamera(i);
+}
+
 // Small 3-col grid — used only to pick the reference frame.
 function drawThumbGrid() {
   const wrap = $("thumbs");
@@ -137,13 +149,7 @@ function drawThumbGrid() {
     div.appendChild(cv);
     div.appendChild(badge);
 
-    div.addEventListener("click", () => {
-      if (i === state.refIdx) return;
-      state.refIdx = i;
-      state.queryPts = [];
-      state.tracks = null;
-      renderTracking();
-    });
+    div.addEventListener("click", () => selectCamera(i));
 
     wrap.appendChild(div);
   });
@@ -170,8 +176,16 @@ function drawRefCanvas() {
   });
   if (state.tracks) {
     state.tracks.forEach((perFrame, qi) => {
-      const [x, y, vis] = perFrame[state.refIdx];
-      dot(ctx, x * sx, y * sy, COLORS[qi % COLORS.length], vis >= 0.5);
+      const color = COLORS[qi % COLORS.length];
+      // Full trajectory of this point projected onto the reference frame.
+      const pts = perFrame.map(([x, y, vis]) => ({
+        x: x * sx,
+        y: y * sy,
+        vis,
+      }));
+      tracePath(ctx, pts, color);
+      const [rx, ry, rvis] = perFrame[state.refIdx];
+      dot(ctx, rx * sx, ry * sy, color, rvis >= 0.5);
     });
   }
 
@@ -204,14 +218,6 @@ function drawTrackStrip() {
   imgs.forEach((img, i) => {
     const ox = i * fdW;
     ctx.drawImage(img, ox, 0, fdW, H);
-
-    if (state.tracks) {
-      state.tracks.forEach((perFrame, qi) => {
-        const [x, y, vis] = perFrame[i];
-        dot(ctx, ox + x * sx, y * sy, COLORS[qi % COLORS.length], vis >= 0.5);
-      });
-    }
-
     ctx.fillStyle = "#000a";
     ctx.fillRect(ox + 2, 2, 26, 16);
     ctx.fillStyle = "#fff";
@@ -220,11 +226,44 @@ function drawTrackStrip() {
     ctx.fillText(`#${i}`, ox + 5, 4);
   });
 
+  // Per-query trace across all frames, then dots on top.
+  if (state.tracks) {
+    state.tracks.forEach((perFrame, qi) => {
+      const color = COLORS[qi % COLORS.length];
+      const pts = perFrame.map(([x, y, vis], i) => ({
+        x: i * fdW + x * sx,
+        y: y * sy,
+        vis,
+      }));
+      tracePath(ctx, pts, color);
+      pts.forEach((p) => dot(ctx, p.x, p.y, color, p.vis >= 0.5));
+    });
+  }
+
   const stripEl = $("trackStrip");
   const firstShow = stripEl.hidden;
   stripEl.hidden = false;
   // Strip just appeared → its grid row shrinks the viewer; trigger a resize.
   if (firstShow) window.dispatchEvent(new Event("resize"));
+}
+
+// pts: [{x, y, vis}, ...] in canvas px. Connects consecutive points; a
+// segment touching an occluded endpoint is dashed and faded.
+function tracePath(ctx, pts, color) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const occluded = a.vis < 0.5 || b.vis < 0.5;
+    ctx.setLineDash(occluded ? [4, 4] : []);
+    ctx.globalAlpha = occluded ? 0.4 : 1;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function dot(ctx, x, y, color, filled) {
