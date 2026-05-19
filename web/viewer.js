@@ -49,6 +49,14 @@ export class Viewer {
     this.root.clear();
   }
 
+  // Manual 180° pitch flip (y→-y, z→-z): a true vertical flip with no
+  // left-right mirror. VGGT world orientation is arbitrary per scene, so
+  // this is a user toggle rather than an automatic correction.
+  flipVertical() {
+    this.root.rotation.x += Math.PI;
+    this._frameToContent();
+  }
+
   async loadPointCloud(url) {
     const gltf = await new GLTFLoader().loadAsync(url);
     gltf.scene.traverse((o) => {

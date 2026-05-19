@@ -22,11 +22,12 @@ function setStatus(msg, isErr = false) {
 }
 
 $("run").addEventListener("click", reconstruct);
+$("flip").addEventListener("click", () => viewer.flipVertical());
 $("track").addEventListener("click", runTracking);
 $("clearPts").addEventListener("click", () => {
   state.queryPts = [];
   state.tracks = null;
-  drawThumbs();
+  renderTracking();
 });
 $("dlGlb").addEventListener("click", () => {
   if (state.session) window.open(`/api/asset/${state.session}.glb`, "_blank");
@@ -74,11 +75,12 @@ async function reconstruct() {
     }
 
     await loadFrameImages();
-    drawThumbs();
+    $("trackBox").hidden = false;   // must be visible so #refCanvas can measure its width
+    renderTracking();
     renderCameraTable();
 
-    $("trackBox").hidden = false;
     $("camBox").hidden = false;
+    $("flip").disabled = false;
     $("dlGlb").disabled = false;
     $("dlCam").disabled = false;
     $("track").disabled = false;
@@ -108,7 +110,14 @@ function loadFrameImages() {
 
 const COLORS = ["#ff5252", "#4caf50", "#ffc107", "#e040fb", "#00e5ff", "#ff9100"];
 
-function drawThumbs() {
+function renderTracking() {
+  drawThumbGrid();
+  drawRefCanvas();
+  drawTrackStrip();
+}
+
+// Small 3-col grid — used only to pick the reference frame.
+function drawThumbGrid() {
   const wrap = $("thumbs");
   wrap.innerHTML = "";
   state.frameImgs.forEach((img, i) => {
@@ -120,25 +129,7 @@ function drawThumbs() {
     const dispH = Math.round((state.fh / state.fw) * dispW);
     cv.width = dispW;
     cv.height = dispH;
-    const ctx = cv.getContext("2d");
-    ctx.drawImage(img, 0, 0, dispW, dispH);
-
-    const sx = dispW / state.fw;
-    const sy = dispH / state.fh;
-
-    // Query points (only meaningful on the reference frame).
-    if (i === state.refIdx) {
-      state.queryPts.forEach(([x, y], qi) => {
-        dot(ctx, x * sx, y * sy, COLORS[qi % COLORS.length], true);
-      });
-    }
-    // Tracked positions for this frame.
-    if (state.tracks) {
-      state.tracks.forEach((perFrame, qi) => {
-        const [x, y, vis] = perFrame[i];
-        dot(ctx, x * sx, y * sy, COLORS[qi % COLORS.length], vis >= 0.5);
-      });
-    }
+    cv.getContext("2d").drawImage(img, 0, 0, dispW, dispH);
 
     const badge = document.createElement("span");
     badge.className = "badge";
@@ -146,24 +137,94 @@ function drawThumbs() {
     div.appendChild(cv);
     div.appendChild(badge);
 
-    cv.addEventListener("click", (ev) => {
-      if (i !== state.refIdx) {
-        state.refIdx = i;
-        state.queryPts = [];
-        state.tracks = null;
-        drawThumbs();
-        return;
-      }
-      const rect = cv.getBoundingClientRect();
-      const px = ((ev.clientX - rect.left) / rect.width) * state.fw;
-      const py = ((ev.clientY - rect.top) / rect.height) * state.fh;
-      state.queryPts.push([px, py]);
+    div.addEventListener("click", () => {
+      if (i === state.refIdx) return;
+      state.refIdx = i;
+      state.queryPts = [];
       state.tracks = null;
-      drawThumbs();
+      renderTracking();
     });
 
     wrap.appendChild(div);
   });
+}
+
+// Enlarged reference frame — where the user clicks query points.
+function drawRefCanvas() {
+  const cv = $("refCanvas");
+  const img = state.frameImgs[state.refIdx];
+  if (!img) return;
+
+  const dispW = cv.clientWidth || cv.parentElement.clientWidth || 300;
+  const dispH = Math.round((state.fh / state.fw) * dispW);
+  cv.width = dispW;
+  cv.height = dispH;
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(img, 0, 0, dispW, dispH);
+
+  const sx = dispW / state.fw;
+  const sy = dispH / state.fh;
+
+  state.queryPts.forEach(([x, y], qi) => {
+    dot(ctx, x * sx, y * sy, COLORS[qi % COLORS.length], true);
+  });
+  if (state.tracks) {
+    state.tracks.forEach((perFrame, qi) => {
+      const [x, y, vis] = perFrame[state.refIdx];
+      dot(ctx, x * sx, y * sy, COLORS[qi % COLORS.length], vis >= 0.5);
+    });
+  }
+
+  cv.onclick = (ev) => {
+    const rect = cv.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * state.fw;
+    const py = ((ev.clientY - rect.top) / rect.height) * state.fh;
+    state.queryPts.push([px, py]);
+    state.tracks = null;
+    renderTracking();
+  };
+}
+
+// Full-width bottom strip — all frames concatenated horizontally with the
+// tracked points drawn (filled = visible, hollow = occluded).
+function drawTrackStrip() {
+  const imgs = state.frameImgs;
+  if (!imgs.length) return;
+
+  const H = 220;
+  const fdW = Math.round((state.fw / state.fh) * H);
+  const cv = $("stripCanvas");
+  cv.width = fdW * imgs.length;
+  cv.height = H;
+  const ctx = cv.getContext("2d");
+
+  const sx = fdW / state.fw;
+  const sy = H / state.fh;
+
+  imgs.forEach((img, i) => {
+    const ox = i * fdW;
+    ctx.drawImage(img, ox, 0, fdW, H);
+
+    if (state.tracks) {
+      state.tracks.forEach((perFrame, qi) => {
+        const [x, y, vis] = perFrame[i];
+        dot(ctx, ox + x * sx, y * sy, COLORS[qi % COLORS.length], vis >= 0.5);
+      });
+    }
+
+    ctx.fillStyle = "#000a";
+    ctx.fillRect(ox + 2, 2, 26, 16);
+    ctx.fillStyle = "#fff";
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.textBaseline = "top";
+    ctx.fillText(`#${i}`, ox + 5, 4);
+  });
+
+  const stripEl = $("trackStrip");
+  const firstShow = stripEl.hidden;
+  stripEl.hidden = false;
+  // Strip just appeared → its grid row shrinks the viewer; trigger a resize.
+  if (firstShow) window.dispatchEvent(new Event("resize"));
 }
 
 function dot(ctx, x, y, color, filled) {
@@ -198,7 +259,7 @@ async function runTracking() {
     });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
     state.tracks = (await res.json()).tracks;
-    drawThumbs();
+    renderTracking();
     setStatus("Tracking done — filled = visible, hollow = occluded.");
   } catch (e) {
     setStatus(`Tracking failed: ${e.message}`, true);
