@@ -1,4 +1,4 @@
-import { Viewer } from "/viewer.js?v=3";
+import { Viewer } from "/viewer.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 const viewer = new Viewer($("viewer"));
@@ -68,6 +68,7 @@ async function reconstruct() {
     state.tracks = null;
 
     viewer.clear();
+    viewer.setUpFromCameras(data.cameras);   // set orbit up-axis before framing
     await viewer.loadPointCloud(data.pointcloud_url);
     const scale = viewer.frustumScale(data.cameras);
     data.cameras.forEach((cam, i) => {

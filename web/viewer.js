@@ -25,9 +25,13 @@ export class Viewer {
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    this.controls.zoomSpeed = 2.5;
+    this.controls.zoomToCursor = true;
 
     this.root = new THREE.Group();
     this.scene.add(this.root);
+
+    this.up = new THREE.Vector3(0, 1, 0);  // scene up; refined from camera poses
 
     this.cameras = [];          // [{ group, line }] per camera, index-aligned
     this.selected = -1;
@@ -180,17 +184,45 @@ export class Viewer {
     this.selected = idx;
   }
 
+  // VGGT cameras are OpenCV convention: cam_to_world column 1 is the camera's
+  // local +Y (image-down) axis in world space, so world-up ≈ mean of the
+  // negated column-1 vectors. Used as the OrbitControls azimuth axis so
+  // left/right drag is a turntable spin regardless of VGGT's arbitrary frame.
+  setUpFromCameras(cameras) {
+    const up = new THREE.Vector3();
+    for (const cam of cameras) {
+      const m = cam.cam_to_world;
+      up.add(new THREE.Vector3(-m[0][1], -m[1][1], -m[2][1]));
+    }
+    if (up.lengthSq() > 1e-9) {
+      up.normalize();
+      this.up.copy(up);
+      this.camera.up.copy(up);
+    }
+  }
+
   _frameToContent() {
     const box = new THREE.Box3().setFromObject(this.root);
     if (box.isEmpty()) return;
     const c = box.getCenter(new THREE.Vector3());
     const r = box.getSize(new THREE.Vector3()).length() * 0.5 || 1;
+
+    // View direction must not be parallel to the up axis.
+    const seed =
+      Math.abs(this.up.dot(new THREE.Vector3(0, 0, 1))) > 0.9
+        ? new THREE.Vector3(0, 1, 0)
+        : new THREE.Vector3(0, 0, 1);
+    const dir = seed
+      .sub(this.up.clone().multiplyScalar(seed.dot(this.up)))
+      .normalize();
+
     this.controls.target.copy(c);
-    this.camera.position.copy(c).add(new THREE.Vector3(0, 0, r * 2.2));
+    this.camera.position.copy(c).add(dir.multiplyScalar(r * 2.2));
     this.raycaster.params.Line.threshold = r * 0.02;
     this.camera.near = r / 100;
     this.camera.far = r * 100;
     this.camera.updateProjectionMatrix();
+    this.controls.update();
   }
 
   // Average distance between camera centers — a sane frustum size.

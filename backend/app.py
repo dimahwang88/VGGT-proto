@@ -8,11 +8,14 @@ memory with a TTL and a hard cap (each retains GPU tensors for tracking).
 from __future__ import annotations
 
 import asyncio
+import io
 import tempfile
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from PIL import Image, ImageOps
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -74,8 +77,18 @@ async def api_reconstruct(images: list[UploadFile] = File(...)) -> ReconstructRe
         paths: list[str] = []
         for idx, up in enumerate(images):
             data = await up.read()
-            p = Path(tmp) / f"{idx:04d}_{Path(up.filename or 'img').name}"
-            p.write_bytes(data)
+            # Bake EXIF orientation into pixels — VGGT's PIL loader ignores
+            # the EXIF rotate tag, so phone portraits would otherwise be fed
+            # (and reconstructed) sideways.
+            p = Path(tmp) / f"{idx:04d}.png"
+            try:
+                img = ImageOps.exif_transpose(
+                    Image.open(io.BytesIO(data))
+                ).convert("RGB")
+                img.save(p, format="PNG")
+            except Exception:
+                p = Path(tmp) / f"{idx:04d}_{Path(up.filename or 'img').name}"
+                p.write_bytes(data)
             paths.append(str(p))
 
         async with _gpu_lock:
