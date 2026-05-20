@@ -556,6 +556,76 @@ function mlpDiagramSvg() {
   </svg>`;
 }
 
+// SVG of the one-patch → one-token mapping: highlight a 14×14 tile in an
+// image grid, flatten + project, add a position embedding, become a token.
+function patchToTokenSvg() {
+  const imgX = 20, imgY = 40, imgW = 150, imgH = 150;
+  const grid = 9;
+  const cell = imgW / grid;
+  let gridLines = "";
+  for (let i = 0; i <= grid; i++) {
+    const o = i * cell;
+    gridLines += `<line x1="${imgX + o}" y1="${imgY}" x2="${imgX + o}" y2="${imgY + imgH}" stroke="#2a2c31" stroke-width="0.5"/>`;
+    gridLines += `<line x1="${imgX}" y1="${imgY + o}" x2="${imgX + imgW}" y2="${imgY + o}" stroke="#2a2c31" stroke-width="0.5"/>`;
+  }
+  const hr = 4, hc = 5; // highlighted cell
+  const hl = `<rect x="${imgX + hc * cell}" y="${imgY + hr * cell}" width="${cell}" height="${cell}" fill="#ff5252" opacity="0.75"/>`;
+  const tileX = 230, tileY = 60, tileW = 80;
+  let tile = `<rect x="${tileX}" y="${tileY}" width="${tileW}" height="${tileW}" fill="#ff5252" opacity="0.5"/>`;
+  const sub = 4;
+  for (let i = 0; i <= sub; i++) {
+    const o = (i * tileW) / sub;
+    tile += `<line x1="${tileX + o}" y1="${tileY}" x2="${tileX + o}" y2="${tileY + tileW}" stroke="#2a2c31" stroke-width="0.5"/>`;
+    tile += `<line x1="${tileX}" y1="${tileY + o}" x2="${tileX + tileW}" y2="${tileY + o}" stroke="#2a2c31" stroke-width="0.5"/>`;
+  }
+  return `
+  <svg viewBox="0 0 760 250" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
+    <defs>
+      <marker id="pa" markerWidth="8" markerHeight="8" refX="6" refY="4"
+              orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#9aa0a6"/>
+      </marker>
+    </defs>
+    <text x="${imgX + imgW / 2}" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">image (3, H, W)</text>
+    <rect x="${imgX}" y="${imgY}" width="${imgW}" height="${imgH}" fill="#1c2434"/>
+    ${gridLines}${hl}
+    <text x="${imgX + imgW / 2}" y="${imgY + imgH + 16}" text-anchor="middle" fill="#9aa0a6" font-size="11">grid of P = (H/14)(W/14) patches</text>
+
+    <line x1="${imgX + (hc + 1) * cell + 4}" y1="${imgY + (hr + 0.5) * cell}"
+          x2="${tileX - 8}" y2="${tileY + tileW / 2}"
+          stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#pa)"/>
+
+    <text x="${tileX + tileW / 2}" y="${tileY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">one patch — 14×14×3 = 588 values</text>
+    ${tile}
+
+    <line x1="${tileX + tileW + 4}" y1="${tileY + tileW / 2}"
+          x2="380" y2="${tileY + tileW / 2}"
+          stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#pa)"/>
+
+    <rect x="380" y="${tileY + tileW / 2 - 22}" width="150" height="44" rx="5"
+          fill="#2b6cff" stroke="#2a2c31"/>
+    <text x="455" y="${tileY + tileW / 2 - 4}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">flatten · Wₚₐₜcₕ</text>
+    <text x="455" y="${tileY + tileW / 2 + 12}" text-anchor="middle" fill="#cfd2d6" font-size="10">Wₚₐₜcₕ ∈ ℝ^{C × 588}</text>
+
+    <line x1="535" y1="${tileY + tileW / 2}" x2="580" y2="${tileY + tileW / 2}"
+          stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#pa)"/>
+
+    <text x="595" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">token</text>
+    <rect x="585" y="${imgY}" width="20" height="${imgH}" rx="3" fill="#ff5252" stroke="#2a2c31"/>
+    <text x="595" y="${imgY + imgH + 16}" text-anchor="middle" fill="#9aa0a6" font-size="11">ℝ^C, C=1024</text>
+
+    <text x="623" y="${tileY + tileW / 2 + 5}" fill="#cfd2d6" font-size="16">+</text>
+
+    <text x="660" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">pos embed</text>
+    <rect x="650" y="${imgY}" width="20" height="${imgH}" rx="3" fill="#34373d" stroke="#2a2c31"/>
+
+    <text x="685" y="${tileY + tileW / 2 + 5}" fill="#cfd2d6" font-size="16">=</text>
+
+    <text x="725" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">patch token</text>
+    <rect x="715" y="${imgY}" width="20" height="${imgH}" rx="3" fill="#1b5fff" stroke="#2a2c31"/>
+  </svg>`;
+}
+
 function flowStep(title, body, color = "#2b6cff") {
   return `
   <div style="border-left:3px solid ${color};padding:6px 10px;margin:6px 0;background:#1c1e22;border-radius:4px">
@@ -689,6 +759,28 @@ function renderAnatomy() {
      in this expansion (${kx(String.raw`2\!\cdot\!C\!\cdot\!4C=8C^2`, false)} for MLP
      vs ${kx(String.raw`4C^2`, false)} for Q,K,V,W^O combined). GELU adds a
      smooth gating non-linearity that empirically beats ReLU for transformers.</p>
+
+  <h4 style="margin:18px 0 6px">One patch → one token (the 1-to-1 mapping)</h4>
+  <p>The image is tiled by the patch-embed conv (kernel = stride = 14) into
+     <b>non-overlapping</b> 14×14×3 tiles. Each tile — a single
+     ${kx(String.raw`14\!\cdot\!14\!\cdot\!3=588`, false)}-number vector — is
+     compressed by one learned linear projection into a single
+     ${kx(String.raw`C`, false)}-dim <b>token</b>, and a position embedding is
+     added so the model knows <i>which</i> patch in the grid it came from:</p>
+  ${kx(String.raw`\underbrace{\text{patch}\;\in\mathbb{R}^{588}}_{14\times 14\times 3}\;\xrightarrow{W_{\text{patch}}\in\mathbb{R}^{C\times 588}}\;\text{token}\in\mathbb{R}^{C}\;\xrightarrow{+\,\text{pos embed}}\;\text{patch token}\in\mathbb{R}^{C}`)}
+  ${patchToTokenSvg()}
+  <p>Stacking all ${kx(String.raw`P=(H/14)(W/14)`, false)} patch tokens gives
+     the patch part of the per-image sequence: a
+     ${kx(String.raw`(P,\,C)`, false)} matrix. The aggregator then prepends
+     <b>5 extra tokens that don't come from any patch</b> — 1 camera + 4
+     register tokens (learned vectors); together they make the
+     ${kx(String.raw`S = 1\!+\!4\!+\!P`, false)} per-image sequence.</p>
+  <p class="hint">Two practical consequences you already see in this app:
+   (i) the Attention picker's similarity heatmap is exactly
+   ${kx(String.raw`(H/14)\!\times\!(W/14)`, false)} — one cell per patch token,
+   not per pixel — and your click snaps to the nearest patch cell.
+   (ii) ${kx(String.raw`H,W`, false)} must be multiples of 14 (the backend
+   preprocesses to that), otherwise patches don't tile the image cleanly.</p>
 
   <h4 style="margin:18px 0 6px">Per-image token layout (one row of length S)</h4>
   <div style="overflow-x:auto">${tokenLayoutSvg()}</div>
