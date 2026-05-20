@@ -341,6 +341,102 @@ function attentionMaskSvg(kind, N = 3, S = 6) {
   return `<svg width="${size}" height="${size}" style="background:#101114;border:1px solid #2a2c31;border-radius:4px">${rects}${lines}</svg>`;
 }
 
+// SVG of multi-head self-attention: x -> Q,K,V projections -> h heads ->
+// per-head softmax(QKᵀ/√d_k)V -> concat -> W^O. Compact and self-labelled.
+function msaDiagramSvg() {
+  const heads = ["head 1", "head 2", "head 3", "…", "head h=16"];
+  const W = 760, H = 500;
+  const box = (x, y, w, h, fill, label, sub = "") => `
+    <g>
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6"
+            fill="${fill}" stroke="#2a2c31" />
+      <text x="${x + w / 2}" y="${y + h / 2 - 2}" text-anchor="middle"
+            fill="#fff" font-size="12" font-weight="600">${label}</text>
+      ${sub ? `<text x="${x + w / 2}" y="${y + h / 2 + 13}" text-anchor="middle"
+            fill="#9aa0a6" font-size="10">${sub}</text>` : ""}
+    </g>`;
+  const arrow = (x1, y1, x2, y2) => `
+    <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"
+          stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#a)" />`;
+  const headRows = heads.map((name, i) => {
+    const y = 215 + i * 28;
+    return `
+      ${box(60, y, 640, 22, i === 3 ? "#101114" : "#1c2434",
+        i === 3 ? "…" :
+        `${name}:  Attn(Q${i + 1}, K${i + 1}, V${i + 1}) = softmax(Q${i + 1}K${i + 1}ᵀ / √d_k) V${i + 1}     →   (S, d_k=64)`)}
+    `;
+  }).join("");
+  return `
+  <svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:6px">
+    <defs>
+      <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="4"
+              orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#9aa0a6"/>
+      </marker>
+    </defs>
+    ${box(280, 8, 200, 30, "#34373d", "input  x", "(S, C) — one image's tokens")}
+    ${arrow(380, 38, 150, 70)} ${arrow(380, 38, 380, 70)} ${arrow(380, 38, 610, 70)}
+    ${box(60, 70, 180, 32, "#2b6cff", "Q = x W^Q", "(S, C)")}
+    ${box(290, 70, 180, 32, "#2b6cff", "K = x W^K", "(S, C)")}
+    ${box(520, 70, 180, 32, "#2b6cff", "V = x W^V", "(S, C)")}
+    ${arrow(150, 102, 150, 130)} ${arrow(380, 102, 380, 130)} ${arrow(610, 102, 610, 130)}
+    ${box(60, 130, 640, 32, "#23272f",
+      "reshape  →  h = 16 heads, each Q_i, K_i, V_i ∈ ℝ^{S × d_k}     (d_k = C / h = 1024 / 16 = 64)")}
+    ${arrow(380, 162, 380, 210)}
+    ${headRows}
+    ${(() => {
+      const yEnd = 215 + heads.length * 28;
+      return `
+        ${arrow(380, yEnd, 380, yEnd + 30)}
+        ${box(60, yEnd + 35, 640, 28, "#23272f",
+          "concat heads on channel axis  →  (S, h·d_k = C)")}
+        ${arrow(380, yEnd + 63, 380, yEnd + 93)}
+        ${box(60, yEnd + 98, 640, 28, "#2b6cff",
+          "output  =  (concat) · W^O    ∈  ℝ^{S × C}")}
+      `;
+    })()}
+  </svg>`;
+}
+
+// SVG of the MLP / FFN: per-token C -> 4C -> GELU -> C bottleneck.
+function mlpDiagramSvg() {
+  const u = 24;
+  const c = 4 * u; // bar height ∝ width
+  const ay = (h) => 70 - h / 2;
+  const W = 760;
+  const box = (x, w, h, fill, label, sub) => `
+    <g>
+      <rect x="${x}" y="${ay(h)}" width="${w}" height="${h}" rx="5"
+            fill="${fill}" stroke="#2a2c31"/>
+      <text x="${x + w / 2}" y="${ay(h) + h + 16}" text-anchor="middle"
+            fill="#fff" font-size="12" font-weight="600">${label}</text>
+      <text x="${x + w / 2}" y="${ay(h) + h + 30}" text-anchor="middle"
+            fill="#9aa0a6" font-size="10">${sub}</text>
+    </g>`;
+  const arr = (x) => `<line x1="${x}" y1="70" x2="${x + 30}" y2="70"
+            stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#b)" />`;
+  return `
+  <svg viewBox="0 0 ${W} 150" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px 6px">
+    <defs>
+      <marker id="b" markerWidth="8" markerHeight="8" refX="6" refY="4"
+              orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#9aa0a6"/>
+      </marker>
+    </defs>
+    ${box(40, 40, c, "#34373d", "x", "ℝ^C   (C = 1024)")}
+    ${arr(80)}
+    ${box(140, 80, c, "#2b6cff", "W₁ x", "ℝ^{4C} (= 4096)")}
+    <text x="220" y="${ay(c) + c + 50}" text-anchor="middle"
+          fill="#cfd2d6" font-size="11">↑ 4× expansion</text>
+    ${arr(280)}
+    ${box(330, 80, c, "#ffd400", "GELU", "elementwise")}
+    ${arr(440)}
+    ${box(490, 80, c, "#2b6cff", "W₂ (·)", "ℝ^C")}
+    ${arr(600)}
+    ${box(650, 40, c, "#34373d", "MLP(x)", "ℝ^C")}
+  </svg>`;
+}
+
 function flowStep(title, body, color = "#2b6cff") {
   return `
   <div style="border-left:3px solid ${color};padding:6px 10px;margin:6px 0;background:#1c1e22;border-radius:4px">
@@ -359,8 +455,97 @@ function renderAnatomy() {
      applied before the multi-head self-attention, which changes <i>which
      tokens are allowed to attend to which</i>. Stack
      ${kx(String.raw`L\!\approx\!24`, false)} of these to get the aggregator.</p>
+  <table style="border-collapse:collapse;margin:8px 0;font-size:12px">
+    <tr><th style="text-align:left;padding:3px 10px;border:1px solid #2a2c31;background:#1c1e22">symbol</th>
+        <th style="text-align:left;padding:3px 10px;border:1px solid #2a2c31;background:#1c1e22">meaning</th>
+        <th style="text-align:left;padding:3px 10px;border:1px solid #2a2c31;background:#1c1e22">typical value</th></tr>
+    <tr><td style="padding:3px 10px;border:1px solid #2a2c31">${kx(String.raw`B`, false)}</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31"><b>batch</b> — number of scenes per forward pass</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31">1 in this app</td></tr>
+    <tr><td style="padding:3px 10px;border:1px solid #2a2c31">${kx(String.raw`N`, false)}</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31"><b>number of views / images</b> in the scene — what you uploaded</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31">≈ 1–50</td></tr>
+    <tr><td style="padding:3px 10px;border:1px solid #2a2c31">${kx(String.raw`S`, false)}</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31"><b>tokens per image</b>: ${kx(String.raw`1_{\text{cam}}+4_{\text{reg}}+P`, false)} where ${kx(String.raw`P=\tfrac{H}{14}\!\cdot\!\tfrac{W}{14}`, false)}</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31">e.g. 5 + 1369 = 1374 at 518×518</td></tr>
+    <tr><td style="padding:3px 10px;border:1px solid #2a2c31">${kx(String.raw`C`, false)}</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31"><b>hidden dim</b> — width of every token vector</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31">1024 (ViT-L/14)</td></tr>
+    <tr><td style="padding:3px 10px;border:1px solid #2a2c31">MSA</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31"><b>Multi-head Self-Attention</b>: ${kx(String.raw`h`, false)} parallel heads of ${kx(String.raw`\mathrm{softmax}(QK^\top/\sqrt{d_k})V`, false)}, concatenated then linearly projected</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31">${kx(String.raw`h\!=\!16`, false)} heads, ${kx(String.raw`d_k\!=\!C/h\!=\!64`, false)}</td></tr>
+    <tr><td style="padding:3px 10px;border:1px solid #2a2c31">MLP</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31"><b>Multi-Layer Perceptron</b> (a.k.a. FFN): per-token 2-layer feed-forward ${kx(String.raw`W_2\,\mathrm{GELU}(W_1 x)`, false)}</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31">MLP ratio 4: ${kx(String.raw`C\!\to\!4C\!\to\!C`, false)}</td></tr>
+    <tr><td style="padding:3px 10px;border:1px solid #2a2c31">LN</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31"><b>LayerNorm</b> — normalizes each token vector to zero mean / unit variance, then scales & shifts with learned ${kx(String.raw`\gamma,\beta`, false)}</td>
+        <td style="padding:3px 10px;border:1px solid #2a2c31">"pre-LN" = LN inside the residual branch</td></tr>
+  </table>
 
-  <h4 style="margin:14px 0 4px">Per-image token layout (one row of length S)</h4>
+  <h4 style="margin:18px 0 6px">Refresher — LayerNorm (LN)</h4>
+  <p>For a single token vector ${kx(String.raw`\mathbf{x}\in\mathbb{R}^{C}`, false)} (one of the
+     ${kx(String.raw`B\!\cdot\!N\!\cdot\!S`, false)} tokens in the grid), LN computes
+     per-token statistics <i>across the channel axis</i>:</p>
+  ${kx(String.raw`\mu=\tfrac{1}{C}\!\sum_{i=1}^{C}\!x_i,\qquad
+                  \sigma^2=\tfrac{1}{C}\!\sum_{i=1}^{C}(x_i-\mu)^2`)}
+  <p>then normalizes and applies a learned per-channel affine
+     (${kx(String.raw`\gamma,\beta\in\mathbb{R}^{C}`, false)}):</p>
+  ${kx(String.raw`\mathrm{LN}(\mathbf{x})_i=\gamma_i\cdot\frac{x_i-\mu}{\sqrt{\sigma^2+\varepsilon}}+\beta_i`)}
+  <p>LN is applied <b>independently per token</b> — it never mixes information across
+     tokens or across the batch. (Contrast with BatchNorm, which normalizes across the
+     batch and would couple tokens across scenes.) That's why the same LN module works
+     unchanged for both AA sub-blocks: the frame-wise reshape
+     ${kx(String.raw`(B\!\cdot\!N,\,S,\,C)`, false)} and the global reshape
+     ${kx(String.raw`(B,\,N\!\cdot\!S,\,C)`, false)} both leave the per-token
+     ${kx(String.raw`C`, false)} axis intact.</p>
+
+  <h5 style="margin:10px 0 4px">Pre-LN vs post-LN — and why VGGT uses pre-LN</h5>
+  <p>Look at where LN sits in the residual:</p>
+  ${kx(String.raw`\underbrace{\mathbf{x}\leftarrow\mathbf{x}+\mathrm{MSA}\!\big(\mathrm{LN}(\mathbf{x})\big)}_{\textbf{pre-LN — VGGT}}
+     \quad\text{vs.}\quad
+     \underbrace{\mathbf{x}\leftarrow\mathrm{LN}\!\big(\mathbf{x}+\mathrm{MSA}(\mathbf{x})\big)}_{\text{post-LN — original Transformer}}`)}
+  <p>In pre-LN, LN is <i>inside</i> the residual branch — the residual path
+     ${kx(String.raw`\mathbf{x}+\cdots`, false)} carries the un-normalized signal
+     straight through. Pre-LN became standard because, with deep stacks (24+ blocks like the aggregator),
+     it gives noticeably better gradient flow and trains <b>without learning-rate warmup</b>
+     (Xiong et al. 2020). MSA / MLP see inputs with controlled scale so logits don't
+     explode, while the residual stream can accumulate features across all
+     ${kx(String.raw`L`, false)} layers without LN squashing them at every step —
+     important for an aggregator that has to carry geometry information end-to-end.
+     Every modern ViT/LLM (DINOv2, Llama, GPT-NeoX, …) is pre-LN; VGGT inherits this
+     from ViT-L/14.</p>
+
+  <h4 style="margin:18px 0 6px">Refresher — Multi-head Self-Attention (MSA)</h4>
+  <p>Three learned linear projections turn each token into a <b>query</b>,
+     <b>key</b>, and <b>value</b>. The set of all queries attend to the set of
+     all keys (softmax-normalized) to produce weights, which then aggregate the
+     values. Doing this in ${kx(String.raw`h`, false)} parallel <i>heads</i>
+     (each operating on a ${kx(String.raw`d_k=C/h=64`, false)}-dim slice) lets
+     the model attend to several different relations at once:</p>
+  ${kx(String.raw`
+    \begin{aligned}
+       Q&=xW^Q,\quad K=xW^K,\quad V=xW^V\\
+       \mathrm{Attn}_i(Q,K,V)&=\mathrm{softmax}\!\Big(\frac{Q_iK_i^{\!\top}}{\sqrt{d_k}}\Big)\,V_i\\
+       \mathrm{MSA}(x)&=\big[\mathrm{Attn}_1\;\Vert\;\dots\;\Vert\;\mathrm{Attn}_h\big]\,W^O
+    \end{aligned}`)}
+  ${msaDiagramSvg()}
+  <p class="hint">The frame-wise sub-block applies this with a block-diagonal
+     mask over ${kx(String.raw`S`, false)} tokens; the global sub-block applies
+     the exact same MSA but over ${kx(String.raw`N\!\cdot\!S`, false)} tokens
+     with no mask. Same module, different reshape.</p>
+
+  <h4 style="margin:18px 0 6px">Refresher — MLP (FFN inside each block)</h4>
+  <p>Applied <b>independently to every token</b> (no token mixing — that job
+     belongs to MSA). It's a 2-layer feed-forward net with a 4× channel
+     expansion and a GELU non-linearity:</p>
+  ${kx(String.raw`\mathrm{MLP}(x)=W_2\,\mathrm{GELU}(W_1 x),\qquad W_1\in\mathbb{R}^{4C\times C},\;W_2\in\mathbb{R}^{C\times 4C}`)}
+  ${mlpDiagramSvg()}
+  <p class="hint">Roughly two-thirds of a transformer block's parameters live
+     in this expansion (${kx(String.raw`2\!\cdot\!C\!\cdot\!4C=8C^2`, false)} for MLP
+     vs ${kx(String.raw`4C^2`, false)} for Q,K,V,W^O combined). GELU adds a
+     smooth gating non-linearity that empirically beats ReLU for transformers.</p>
+
+  <h4 style="margin:18px 0 6px">Per-image token layout (one row of length S)</h4>
   <div style="overflow-x:auto">${tokenLayoutSvg()}</div>
   <p class="hint">${kx(String.raw`\texttt{cam}`, false)} = camera token (read by
    the camera head). ${kx(String.raw`\texttt{r0..r3}`, false)} = register tokens

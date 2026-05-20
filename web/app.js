@@ -33,9 +33,18 @@ $("depthToggle").addEventListener("click", () => {
 $("learnToggle").addEventListener("click", () => {
   const learn = $("learnView");
   const view = $("viewer");
+  const strip = $("trackStrip");
   const showLearn = learn.hidden;
   learn.hidden = !showLearn;
   view.hidden = showLearn;
+  // The tracking strip occupies its own grid row across the bottom; hide it
+  // while Learn mode is up, restoring its prior state when leaving.
+  if (showLearn) {
+    learn.dataset.stripWas = strip.hidden ? "1" : "0";
+    strip.hidden = true;
+  } else {
+    strip.hidden = learn.dataset.stripWas === "1";
+  }
   $("learnToggle").textContent = showLearn ? "Back to 3D view" : "Learn VGGT";
   // Three.js sized to viewer's clientWidth at last resize. After swapping
   // back, fire resize so the renderer rebinds to the now-visible cell.
@@ -114,7 +123,7 @@ async function reconstruct() {
     // in learn.js or its CDN deps can never block reconstruction. The
     // Learn-VGGT toggle button reveals the right-pane panel when ready.
     const learnView = $("learnView");
-    import("/learn.js?v=6")
+    import("/learn.js?v=10")
       .then((m) => {
         m.initLearn(state, viewer);
         $("learnToggle").disabled = false;
