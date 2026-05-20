@@ -322,23 +322,36 @@ function tokenLayoutSvg() {
 }
 
 function attentionMaskSvg(kind, N = 3, S = 6) {
-  const cell = 9, NS = N * S, size = NS * cell;
+  const cell = 10, NS = N * S, size = NS * cell;
+  const padL = 60, padT = 32, padR = 8, padB = 22;
   let rects = "";
   for (let r = 0; r < NS; r++) {
     for (let c = 0; c < NS; c++) {
       const fr = (r / S) | 0, fc = (c / S) | 0;
       const on = kind === "global" || fr === fc;
-      rects += `<rect x="${c * cell}" y="${r * cell}" width="${cell - 1}" height="${cell - 1}" fill="${on ? "#2b6cff" : "#1c1e22"}"/>`;
+      rects += `<rect x="${padL + c * cell}" y="${padT + r * cell}" width="${cell - 1}" height="${cell - 1}" fill="${on ? "#2b6cff" : "#1c1e22"}"/>`;
     }
   }
-  // frame-boundary guide lines
   let lines = "";
   for (let i = 1; i < N; i++) {
     const p = i * S * cell;
-    lines += `<line x1="${p}" y1="0" x2="${p}" y2="${size}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
-    lines += `<line x1="0" y1="${p}" x2="${size}" y2="${p}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
+    lines += `<line x1="${padL + p}" y1="${padT}" x2="${padL + p}" y2="${padT + size}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
+    lines += `<line x1="${padL}" y1="${padT + p}" x2="${padL + size}" y2="${padT + p}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
   }
-  return `<svg width="${size}" height="${size}" style="background:#101114;border:1px solid #2a2c31;border-radius:4px">${rects}${lines}</svg>`;
+  // Frame labels along top (keys) and left (queries)
+  let frameLbls = "";
+  for (let i = 0; i < N; i++) {
+    const mid = padL + (i + 0.5) * S * cell;
+    frameLbls += `<text x="${mid}" y="${padT - 6}" text-anchor="middle" fill="#cfd2d6" font-size="10">frame ${i + 1}</text>`;
+    const midY = padT + (i + 0.5) * S * cell + 3;
+    frameLbls += `<text x="${padL - 6}" y="${midY}" text-anchor="end" fill="#cfd2d6" font-size="10">frame ${i + 1}</text>`;
+  }
+  // Axis titles
+  const W = padL + size + padR, H = padT + size + padB;
+  const axes = `
+    <text x="${padL + size / 2}" y="${H - 6}" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">→ keys  (token being looked AT)</text>
+    <text x="14" y="${padT + size / 2}" text-anchor="middle" fill="#fff" font-size="11" font-weight="600" transform="rotate(-90 14 ${padT + size / 2})">queries  (token doing the looking) →</text>`;
+  return `<svg width="${W}" height="${H}" style="background:#101114;border:1px solid #2a2c31;border-radius:4px">${axes}${frameLbls}${rects}${lines}</svg>`;
 }
 
 // ----- Matrix-shape SVG helpers for the three MSA equations ----------------
@@ -448,6 +461,59 @@ function eqAttnSvg() {
           fill="#9aa0a6" font-size="11">
       analogous slices: Kᵢ from K, Vᵢ from V (same column-slice index i)
     </text>
+  </svg>`;
+}
+
+// Tiny S=3, d_k=2 worked example showing that `i` is the head index and
+// rows of Q_i / K_i are tokens — A_i[r,c] = q_r · k_c.
+function indexClarifySvg() {
+  const cell = 40;
+  const qX = 110, qW = 2 * cell, qH = 3 * cell, qY = 50;
+  const kX = qX + qW + 70, kW = 3 * cell, kH = 2 * cell, kY = qY + cell / 2;
+  const aX = kX + kW + 80, aW = 3 * cell, aH = 3 * cell, aY = qY;
+  let s = "";
+
+  // Q  (3 token rows × d_k=2 cols)
+  s += `<text x="${qX + qW / 2}" y="${qY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">Q  —  rows = S tokens, cols = dₖ</text>`;
+  for (let r = 0; r < 3; r++) {
+    s += `<text x="${qX - 6}" y="${qY + r * cell + cell / 2 + 4}" text-anchor="end" fill="#ff5252" font-size="11" font-weight="600">q${r + 1}</text>`;
+    for (let c = 0; c < 2; c++) {
+      s += `<rect x="${qX + c * cell}" y="${qY + r * cell}" width="${cell}" height="${cell}" fill="rgba(255,82,82,0.25)" stroke="#2a2c31" stroke-width="0.5"/>`;
+    }
+  }
+  s += `<text x="${qX + qW + 35}" y="${qY + qH / 2 + 7}" text-anchor="middle" fill="#cfd2d6" font-size="22">·</text>`;
+
+  // K^T  (d_k=2 rows × 3 token cols)
+  s += `<text x="${kX + kW / 2}" y="${kY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">Kᵀ  —  cols = S tokens, rows = dₖ</text>`;
+  for (let r = 0; r < 2; r++) {
+    for (let c = 0; c < 3; c++) {
+      s += `<rect x="${kX + c * cell}" y="${kY + r * cell}" width="${cell}" height="${cell}" fill="rgba(76,175,80,0.25)" stroke="#2a2c31" stroke-width="0.5"/>`;
+    }
+  }
+  for (let c = 0; c < 3; c++) {
+    s += `<text x="${kX + c * cell + cell / 2}" y="${kY + kH + 16}" text-anchor="middle" fill="#4caf50" font-size="11" font-weight="600">k${c + 1}</text>`;
+  }
+  s += `<text x="${kX + kW + 35}" y="${qY + qH / 2 + 7}" text-anchor="middle" fill="#cfd2d6" font-size="22">=</text>`;
+
+  // A  (S × S — every pair shown)
+  s += `<text x="${aX + aW / 2}" y="${aY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">A  —  ALL S² pairwise scores, one matmul</text>`;
+  const hr = 0, hc = 1; // highlight q_1 · k_2
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const hi = r === hr && c === hc;
+      const fill = hi ? "rgba(255,212,0,0.45)" : "#1c1e22";
+      const stroke = hi ? "#ffd400" : "#2a2c31";
+      s += `<rect x="${aX + c * cell}" y="${aY + r * cell}" width="${cell}" height="${cell}" fill="${fill}" stroke="${stroke}" stroke-width="${hi ? 1.4 : 0.5}"/>`;
+      s += `<text x="${aX + c * cell + cell / 2}" y="${aY + r * cell + cell / 2 + 4}" text-anchor="middle" fill="#fff" font-size="10">q${r + 1}·k${c + 1}</text>`;
+    }
+  }
+  const hiX = aX + (hc + 1) * cell, hiY = aY + hr * cell + cell / 2;
+  s += `<text x="${hiX + 12}" y="${hiY - 4}" fill="#ffd400" font-size="11" font-weight="600">A[1,2] = q₁·k₂</text>`;
+  s += `<text x="${hiX + 12}" y="${hiY + 12}" fill="#ffd400" font-size="10">token 1's query · token 2's key</text>`;
+
+  return `
+  <svg viewBox="0 0 ${aX + aW + 260} 200" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px">
+    ${s}
   </svg>`;
 }
 
@@ -1117,6 +1183,69 @@ function renderAnatomy() {
      would only write to its own ${kx(String.raw`d_k`, false)} contiguous
      channels — so ${kx(String.raw`W^O`, false)} blends them into a single
      coherent vector before it gets added back into the residual stream.</p>
+
+  <h5 style="margin:14px 0 4px">Why a separate ${kx(String.raw`W^V`, false)}? Why not just <code>w · x</code>?</h5>
+  <p>Reasonable question — the formula collapses to
+     ${kx(String.raw`\mathrm{out}_r=\sum_c w_{rc}\,x_c`, false)} if we set
+     ${kx(String.raw`V=x`, false)}. Three reasons VGGT (and every transformer) doesn't:</p>
+  <div style="background:#1c2434;border-left:3px solid #2b6cff;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>1 — Decoupling <i>routing</i> from <i>payload</i>.</b>
+    ${kx(String.raw`Q,K`, false)} answer <b>"who's relevant to me?"</b>;
+    ${kx(String.raw`V`, false)} answers <b>"what should I deliver if you ask?"</b>.
+    Forcing them to share the same vector (just <code>x</code>) ties two unrelated
+    questions to the same weights. Different ${kx(String.raw`W^V`, false)} means
+    the "what info do I provide?" projection can specialize independently from
+    the "what makes me look relevant?" projection.
+  </div>
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>2 — Per-head specialization.</b> ${kx(String.raw`W^V`, false)} is sliced
+    into ${kx(String.raw`h`, false)} heads, so each head's ${kx(String.raw`V_i`, false)}
+    can extract a <i>different aspect</i> of ${kx(String.raw`x`, false)}: one head
+    might pull "edge orientation" features, another "color statistics", another
+    "depth cues". Without a value projection every head would deliver the
+    identical payload (the raw ${kx(String.raw`x`, false)}) and the multi-head
+    expressivity collapses.
+  </div>
+  <div style="background:#1c2434;border-left:3px solid #ff5252;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>3 — Without ${kx(String.raw`W^V`, false)} attention is linear in
+    ${kx(String.raw`x`, false)}.</b> Output would be a linear combination of
+    input tokens with coefficients (the softmax weights) — but stacking many
+    such layers can only ever produce more linear combinations. Together with
+    the MLP non-linearity, the learned ${kx(String.raw`W^V`, false)} gives the
+    network the expressivity to learn arbitrary nonlinear features of
+    arbitrary subsets of tokens.
+  </div>
+
+  <h5 style="margin:14px 0 4px">How ${kx(String.raw`W^Q,W^K,W^V`, false)} actually get trained</h5>
+  <p>Same recipe as every other weight: <b>random init → forward pass → loss →
+     backprop → SGD step</b>. What's interesting is what the gradient signal
+     ends up teaching them. A toy thought experiment:</p>
+  <p>Suppose the training task says: <i>"for each patch, predict the average
+     depth of patches with similar color."</i> Gradient descent will discover that
+     this minimizes loss when:</p>
+  <ul style="font-size:13px">
+    <li>${kx(String.raw`W^Q`, false)} learns to project ${kx(String.raw`x`, false)}
+        such that ${kx(String.raw`q_r`, false)} encodes <b>"what color am I asking
+        about?"</b></li>
+    <li>${kx(String.raw`W^K`, false)} learns to project ${kx(String.raw`x`, false)}
+        such that ${kx(String.raw`k_c`, false)} encodes <b>"what color do I have?"</b>
+        — making ${kx(String.raw`q_r\cdot k_c`, false)} large when colors match.</li>
+    <li>${kx(String.raw`W^V`, false)} learns to project ${kx(String.raw`x`, false)}
+        such that ${kx(String.raw`v_c`, false)} encodes <b>token c's depth</b> —
+        the payload to retrieve.</li>
+  </ul>
+  <p>Nobody hand-codes any of this. The optimizer just nudges every entry of
+     every ${kx(String.raw`W`, false)} matrix in whichever direction reduces
+     the final loss; over millions of steps, specialized "color-matching" or
+     "edge-matching" or "view-correspondence" patterns <b>emerge</b>. Mechanistic
+     interpretability research has even named some of these emergent patterns —
+     "induction heads", "previous-token heads", etc. In VGGT, heads end up doing
+     things like cross-view feature matching for geometry.</p>
+  <p class="hint">In code: PyTorch's autograd computes
+     ${kx(String.raw`\partial \mathcal{L} / \partial W^Q`, false)} (and same for
+     ${kx(String.raw`W^K,W^V`, false)}) automatically by the chain rule. The
+     optimizer (AdamW for VGGT) then updates
+     ${kx(String.raw`W \leftarrow W - \eta\,\hat{m}/(\sqrt{\hat{v}}+\varepsilon)`, false)}.</p>
   <p class="hint">The frame-wise sub-block applies this with a block-diagonal
      mask over ${kx(String.raw`S`, false)} tokens; the global sub-block applies
      the exact same MSA but over ${kx(String.raw`N\!\cdot\!S`, false)} tokens
@@ -1132,6 +1261,41 @@ function renderAnatomy() {
      in this expansion (${kx(String.raw`2\!\cdot\!C\!\cdot\!4C=8C^2`, false)} for MLP
      vs ${kx(String.raw`4C^2`, false)} for Q,K,V,W^O combined). GELU adds a
      smooth gating non-linearity that empirically beats ReLU for transformers.</p>
+
+  <h5 style="margin:12px 0 4px">What is the MLP actually <i>for</i>? (intuition)</h5>
+  <p>If MSA is the <b>communication</b> step ("look around, gather info"), the
+     MLP is the <b>processing / thinking</b> step ("now do something with what you
+     gathered"). Three angles:</p>
+  <div style="background:#1c2434;border-left:3px solid #2b6cff;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>1 — Per-token nonlinear refinement.</b> Attention just produced a token
+    whose value is a weighted sum of values from elsewhere. That mixture is
+    linear in those inputs. The MLP applies a non-linear transformation
+    <i>per token</i> — it can detect "is the mixed feature now a corner?",
+    "is it a depth discontinuity?", "is it ambiguous?" — things that need
+    non-linear thresholds on combinations of features.
+  </div>
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>2 — Feature detectors / knowledge storage.</b> The
+    ${kx(String.raw`4C\!=\!4096`, false)} hidden units can be thought of as
+    independent feature detectors over the residual stream. Mech-interp research
+    finds that MLPs are where transformers <b>store</b> features and facts;
+    attention is where they <b>route</b> them. In VGGT terms: attention says
+    "patch r and patch c are the same surface"; the MLP then computes new
+    geometry-aware features from that paired signal.
+  </div>
+  <div style="background:#1c2434;border-left:3px solid #ff5252;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>3 — Required for depth to do anything.</b> A stack of MSA-only blocks
+    would collapse to a single linear-plus-softmax function — no matter how
+    deep, you wouldn't gain expressivity. The per-token MLP nonlinearity is
+    what makes the depth ${kx(String.raw`L\!=\!24`, false)} <i>useful</i>: each
+    layer can detect higher-level features built on the previous layer's
+    detectors.
+  </div>
+  <p class="hint"><b>Block-level recipe</b>: <b>gather</b> (MSA) → <b>think</b>
+     (MLP) → pass to next block. By layer 24, every patch token has had 24
+     rounds of "look around, then think" — gathering context from across
+     frames and refining it through 24 layers of non-linear feature
+     construction.</p>
 
   <h4 style="margin:18px 0 6px">One patch → one token (the 1-to-1 mapping)</h4>
   <p>The image is tiled by the patch-embed conv (kernel = stride = 14) into
@@ -1154,6 +1318,52 @@ function renderAnatomy() {
    not per pixel — and your click snaps to the nearest patch cell.
    (ii) ${kx(String.raw`H,W`, false)} must be multiples of 14 (the backend
    preprocesses to that), otherwise patches don't tile the image cleanly.</p>
+
+  <h4 style="margin:18px 0 6px">Why DINOv2 pretraining matters</h4>
+  <p>${kx(String.raw`W_{\text{patch}}`, false)} (and the per-block transformer
+     weights of the aggregator's first layers) are <b>not learned from scratch</b> —
+     they're initialized from <b>DINOv2 ViT-L/14</b> (Oquab et al. 2023), a vision
+     transformer pretrained <b>self-supervised</b> on ~142M images. The "registers"
+     variant gives you the 4 register tokens for free.</p>
+
+  <h5 style="margin:10px 0 4px">DINOv2's pretraining in one paragraph</h5>
+  <p>A <b>student</b> ViT and a <b>teacher</b> ViT (an exponential moving average
+     of the student) both encode two random crops of the same image. The student
+     is trained so its patch tokens and image-level [CLS] token match the teacher's
+     — without any human labels. The student learns features that are <b>invariant
+     to crop, scale, color jitter</b>: patches that depict the same surface end up
+     with similar feature vectors regardless of viewpoint.</p>
+
+  <h5 style="margin:10px 0 4px">What that buys VGGT on day-zero of training</h5>
+  <ul style="margin-top:4px">
+    <li><b>Patch tokens already cluster by content.</b> Out of the box DINOv2
+        features support unsupervised segmentation and image retrieval. So two
+        patches across frames that depict the same physical surface already have
+        <b>similar</b> token vectors before any VGGT-specific training has happened —
+        a huge head-start for the aggregator's global sub-blocks that need to fuse
+        cross-view information.</li>
+    <li><b>VGGT learns geometry on top of semantics, not on top of raw pixels.</b>
+        The aggregator's job becomes "given semantically-meaningful patch tokens,
+        predict cameras and depth," which is much easier than "given raw RGB,
+        do everything end-to-end".</li>
+    <li><b>Far less 3D-annotated data needed.</b> The visual prior is donated by
+        DINOv2's 142M unsupervised images; VGGT only has to specialize that prior
+        for 3D — which is why a ~1B-param checkpoint trained on ~17 datasets can
+        generalize to in-the-wild scenes.</li>
+  </ul>
+
+  <h5 style="margin:10px 0 4px">Visual chain: image → DINOv2 patches → VGGT tokens</h5>
+  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:#0d0e10;border-radius:6px;padding:10px;font-size:12px">
+    <div style="text-align:center"><div style="width:64px;height:64px;background:#1c2434;border:1px solid #2a2c31;border-radius:4px;margin-bottom:4px"></div>raw image<br /><span style="color:#9aa0a6">(3,H,W)</span></div>
+    <div style="color:#9aa0a6">→ patch-embed conv<br /><span style="color:#cfd2d6">init from DINOv2</span></div>
+    <div style="text-align:center"><div style="width:64px;height:64px;background:repeating-linear-gradient(0deg,#1b5fff,#1b5fff 8px,#34373d 8px,#34373d 9px),repeating-linear-gradient(90deg,#1b5fff,#1b5fff 8px,#34373d 8px,#34373d 9px);border-radius:4px;margin-bottom:4px"></div>P patch tokens<br /><span style="color:#9aa0a6">each ∈ ℝ^C, semantic</span></div>
+    <div style="color:#9aa0a6">+ prepend cam + 4 reg tokens<br /><span style="color:#cfd2d6">+ pos embed</span></div>
+    <div style="text-align:center"><div style="width:64px;height:64px;background:#1b5fff;opacity:0.7;border-radius:4px;margin-bottom:4px"></div>x<br /><span style="color:#9aa0a6">(S, C) per image</span></div>
+  </div>
+  <p class="hint">Register tokens come from "Vision Transformers Need Registers"
+     (Darcet et al. 2023): they absorb high-norm artefact activations that would
+     otherwise contaminate patch tokens. DINOv2's <b>with-registers</b> variant
+     is what VGGT loads.</p>
 
   <h4 style="margin:18px 0 6px">Per-image token layout (one row of length S)</h4>
   <div style="overflow-x:auto">${tokenLayoutSvg()}</div>
@@ -1191,17 +1401,41 @@ function renderAnatomy() {
     `As Step 3; output again ${kx(String.raw`(B,N,S,C)`, false)} — ready for the
      next AA block.`, "#ffd400")}
 
-  <h4 style="margin:18px 0 6px">Attention-mask comparison (N=3, S=6 demo)</h4>
+  <h4 style="margin:18px 0 6px">Attention-mask comparison (N=3 frames, S=6 tokens/frame demo)</h4>
+  <p>Each grid is the ${kx(String.raw`NS\!\times\!NS`, false)} table of "is this
+     query token allowed to look at this key token?" — row = query (the token
+     doing the looking), column = key (the token being looked at). Each cell of
+     the matrix is one entry of the score matrix ${kx(String.raw`A=QK^\top`, false)}
+     before softmax.</p>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0">
+    <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px">
+      <span style="display:inline-block;width:14px;height:14px;background:#2b6cff;border:1px solid #2a2c31"></span>
+      attention allowed (computed)
+    </span>
+    <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;margin-left:14px">
+      <span style="display:inline-block;width:14px;height:14px;background:#1c1e22;border:1px solid #2a2c31"></span>
+      blocked / mask = 0 (not computed)
+    </span>
+  </div>
   <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
     <div>
-      <div style="font-size:12px;color:#9aa0a6;margin-bottom:4px">Frame-wise — block-diagonal</div>
+      <div style="font-size:12px;color:#9aa0a6;margin-bottom:4px">Frame-wise sub-block — only same-frame pairs talk</div>
       ${attentionMaskSvg("frame")}
-      <div class="hint" style="margin-top:4px;max-width:170px">Each ${kx(String.raw`S\!\times\!S`, false)} block on the diagonal is one image; off-diagonal blocks are zero.</div>
+      <div class="hint" style="margin-top:4px;max-width:280px">
+        Blue blocks are on the diagonal: a query token in frame 2 can only
+        attend to key tokens in frame 2. Off-diagonal = grey = blocked. (In
+        practice this isn't an explicit mask; the reshape <code>(B,N,S,C)→(B·N,S,C)</code>
+        puts each frame in its own MSA call.)
+      </div>
     </div>
     <div>
-      <div style="font-size:12px;color:#9aa0a6;margin-bottom:4px">Global — full ${kx(String.raw`NS\!\times\!NS`, false)}</div>
+      <div style="font-size:12px;color:#9aa0a6;margin-bottom:4px">Global sub-block — anyone can talk to anyone</div>
       ${attentionMaskSvg("global")}
-      <div class="hint" style="margin-top:4px;max-width:170px">Every token can attend to every other token of every frame.</div>
+      <div class="hint" style="margin-top:4px;max-width:280px">
+        Entire ${kx(String.raw`NS\!\times\!NS`, false)} grid is blue — a query
+        in frame 2 can pull from keys in frame 1 or 3 as well. This is where
+        view fusion actually happens.
+      </div>
     </div>
   </div>
 
