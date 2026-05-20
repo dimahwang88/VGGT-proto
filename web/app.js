@@ -123,7 +123,7 @@ async function reconstruct() {
     // in learn.js or its CDN deps can never block reconstruction. The
     // Learn-VGGT toggle button reveals the right-pane panel when ready.
     const learnView = $("learnView");
-    import("/learn.js?v=10")
+    import("/learn.js?v=12")
       .then((m) => {
         m.initLearn(state, viewer);
         $("learnToggle").disabled = false;

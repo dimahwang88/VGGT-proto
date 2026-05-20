@@ -341,6 +341,125 @@ function attentionMaskSvg(kind, N = 3, S = 6) {
   return `<svg width="${size}" height="${size}" style="background:#101114;border:1px solid #2a2c31;border-radius:4px">${rects}${lines}</svg>`;
 }
 
+// ----- Matrix-shape SVG helpers for the three MSA equations ----------------
+function mBox(x, y, w, h, fill, label, rowLbl, colLbl) {
+  return `
+    <text x="${x + w / 2}" y="${y - 5}" text-anchor="middle" fill="#9aa0a6" font-size="10">${colLbl}</text>
+    <text x="${x - 6}" y="${y + h / 2 + 4}" text-anchor="end" fill="#9aa0a6" font-size="10">${rowLbl}</text>
+    <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" fill="${fill}" stroke="#2a2c31"/>
+    <text x="${x + w / 2}" y="${y + h / 2 + 5}" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">${label}</text>`;
+}
+const mSym = (x, y, s) =>
+  `<text x="${x}" y="${y}" text-anchor="middle" fill="#cfd2d6" font-size="22" font-weight="600">${s}</text>`;
+
+// Eq 1:  Q = x W^Q   (and analogously K, V)
+function eqProjSvg() {
+  const xW = 130, xH = 30, wW = 130, wH = 130;
+  const xPos = 60, wPos = xPos + xW + 50, qPos = wPos + wW + 50;
+  const xY = 60 + (wH - xH) / 2;
+  const midY = xY + xH / 2 + 7;
+  return `
+  <svg viewBox="0 0 ${qPos + xW + 60} 230" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
+    ${mBox(xPos, xY, xW, xH, "#34373d", "x", "S", "C")}
+    ${mSym(xPos + xW + 25, midY, "·")}
+    ${mBox(wPos, 60, wW, wH, "#2b6cff", "Wᴽ", "C", "C")}
+    ${mSym(wPos + wW + 25, midY, "=")}
+    ${mBox(qPos, xY, xW, xH, "#ff5252", "Q", "S", "C")}
+    <text x="${(xPos + qPos + xW) / 2}" y="215" text-anchor="middle" fill="#9aa0a6" font-size="11">
+      same shape for K = xWᴷ and V = xWⱽ (different weights, identical structure)
+    </text>
+  </svg>`;
+}
+
+// Eq 2:  Attn_i(Q,K,V) = softmax( Q_i K_iᵀ / √d_k ) V_i  — per-head attention.
+function eqAttnSvg() {
+  // S=50 tall, d_k=18 thin.
+  const S = 50, dk = 18;
+  // Row 1:  Q_i · K_iᵀ = A_i
+  const r1y = 20;
+  const qX = 60, kX = qX + dk + 50, aX = kX + S + 50;
+  const r1End = aX + S + 30;
+  // Row 2:  softmax(A_i / √d_k) = w_i,  then  w_i · V_i = out
+  const r2y = 130;
+  const wX = 60, vX = wX + S + 50, oX = vX + dk + 50;
+  // soft-max heatmap effect on the weights box: faint horizontal stripes.
+  const wHeatmap = Array.from({ length: 6 }, (_, i) =>
+    `<rect x="${wX}" y="${r2y + (i + 0.5) * (S / 7) - 1}" width="${S}" height="${(S / 8) | 0}" fill="#ffd400" opacity="${0.15 + 0.08 * i}"/>`
+  ).join("");
+  return `
+  <svg viewBox="0 0 ${oX + dk + 60} 220" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
+    <!-- Row 1: scores -->
+    ${mBox(qX, r1y, dk, S, "#ff5252", "Qᵢ", "S", "dₖ")}
+    ${mSym(qX + dk + 25, r1y + S / 2 + 7, "·")}
+    ${mBox(kX, r1y, S, dk, "#4caf50", "Kᵢᵀ", "dₖ", "S")}
+    ${mSym(kX + S + 25, r1y + S / 2 + 7, "=")}
+    ${mBox(aX, r1y, S, S, "#23272f", "Aᵢ", "S", "S")}
+    <text x="${aX + S + 6}" y="${r1y + S / 2 + 4}" fill="#9aa0a6" font-size="11">
+      "scores"  Aᵢ = QᵢKᵢᵀ
+    </text>
+    <!-- softmax arrow -->
+    <line x1="${aX + S / 2}" y1="${r1y + S + 6}" x2="${wX + S / 2}" y2="${r2y - 6}"
+          stroke="#ffd400" stroke-width="1.4" marker-end="url(#ax)"/>
+    <text x="${(aX + S / 2 + wX + S / 2) / 2 + 4}" y="${(r1y + S + r2y) / 2}"
+          fill="#ffd400" font-size="11">softmax( · / √dₖ )</text>
+    <!-- Row 2: weighted V -->
+    ${mBox(wX, r2y, S, S, "#23272f", "wᵢ", "S", "S")}
+    ${wHeatmap}
+    ${mSym(wX + S + 25, r2y + S / 2 + 7, "·")}
+    ${mBox(vX, r2y, dk, S, "#2b6cff", "Vᵢ", "S", "dₖ")}
+    ${mSym(vX + dk + 25, r2y + S / 2 + 7, "=")}
+    ${mBox(oX, r2y, dk, S, "#ff9100", "Attnᵢ", "S", "dₖ")}
+    <defs>
+      <marker id="ax" markerWidth="8" markerHeight="8" refX="6" refY="4"
+              orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#ffd400"/>
+      </marker>
+    </defs>
+  </svg>`;
+}
+
+// Eq 3:  MSA(x) = [Attn_1 || … || Attn_h] · W^O
+function eqConcatSvg() {
+  // 4 visible slices each (S × d_k) → concat into (S × C); then · W^O = out.
+  const S = 60, dk = 18, gap = 6;
+  const visible = 4;
+  const C = visible * dk + (visible - 1) * gap + 30; // visual C width incl '…'
+  const cy = 40;
+  let s = "";
+  const startX = 60;
+  // Four head slices + "…" + label for total
+  const heads = ["Attn₁", "Attn₂", "…", "Attnₕ"];
+  let cur = startX;
+  heads.forEach((name, i) => {
+    if (i === 2) {
+      s += `<text x="${cur + dk / 2}" y="${cy + S / 2 + 6}" text-anchor="middle" fill="#cfd2d6" font-size="20">…</text>`;
+    } else {
+      s += mBox(cur, cy, dk, S, "#ff9100", name, i === 0 ? "S" : "", "dₖ");
+    }
+    cur += dk + gap;
+  });
+  // Annotation bracket below the slices
+  const concatEndX = cur - gap;
+  s += `<path d="M${startX - 4},${cy + S + 8} l0,6 L${concatEndX + 4},${cy + S + 14} l0,-6"
+            stroke="#9aa0a6" fill="none"/>`;
+  s += `<text x="${(startX + concatEndX) / 2}" y="${cy + S + 32}" text-anchor="middle"
+            fill="#9aa0a6" font-size="11">concat on channel axis  →  (S, h·dₖ = C)</text>`;
+  // · W^O = output
+  const woX = concatEndX + 60;
+  const woW = 100, woH = 100;
+  const opMidY = cy + S / 2 + 7;
+  s += mSym(concatEndX + 25, opMidY, "·");
+  s += mBox(woX, cy + (S - woH) / 2, woW, woH, "#2b6cff", "Wᴼ", "C", "C");
+  s += mSym(woX + woW + 25, opMidY, "=");
+  const outX = woX + woW + 50;
+  const outW = 130;
+  s += mBox(outX, cy + (S - 30) / 2, outW, 30, "#34373d", "MSA(x)", "S", "C");
+  return `
+  <svg viewBox="0 0 ${outX + outW + 60} 180" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
+    ${s}
+  </svg>`;
+}
+
 // SVG of multi-head self-attention: x -> Q,K,V projections -> h heads ->
 // per-head softmax(QKᵀ/√d_k)V -> concat -> W^O. Compact and self-labelled.
 function msaDiagramSvg() {
@@ -522,13 +641,39 @@ function renderAnatomy() {
      values. Doing this in ${kx(String.raw`h`, false)} parallel <i>heads</i>
      (each operating on a ${kx(String.raw`d_k=C/h=64`, false)}-dim slice) lets
      the model attend to several different relations at once:</p>
-  ${kx(String.raw`
-    \begin{aligned}
-       Q&=xW^Q,\quad K=xW^K,\quad V=xW^V\\
-       \mathrm{Attn}_i(Q,K,V)&=\mathrm{softmax}\!\Big(\frac{Q_iK_i^{\!\top}}{\sqrt{d_k}}\Big)\,V_i\\
-       \mathrm{MSA}(x)&=\big[\mathrm{Attn}_1\;\Vert\;\dots\;\Vert\;\mathrm{Attn}_h\big]\,W^O
-    \end{aligned}`)}
+  <p><b>1. Projections</b> — three learned linear maps split each input token
+     into a query, key, and value:</p>
+  ${kx(String.raw`Q=xW^Q,\qquad K=xW^K,\qquad V=xW^V`)}
+  ${eqProjSvg()}
+
+  <p><b>2. Per-head attention</b> — within a single head ${kx(String.raw`i`, false)},
+     queries score against keys, softmax-normalize, then take a weighted sum of values:</p>
+  ${kx(String.raw`\mathrm{Attn}_i(Q,K,V)=\mathrm{softmax}\!\Big(\frac{Q_iK_i^{\!\top}}{\sqrt{d_k}}\Big)\,V_i`)}
+  ${eqAttnSvg()}
+  <p class="hint">The grey ${kx(String.raw`S\!\times\!S`, false)} block is the
+     score matrix ${kx(String.raw`A_i`, false)}; softmax along rows normalizes
+     it into the attention <i>weights</i> matrix
+     ${kx(String.raw`w_i`, false)} (faint yellow bands). Multiplying
+     ${kx(String.raw`w_i\cdot V_i`, false)} produces one head's output
+     ${kx(String.raw`\mathrm{Attn}_i\in\mathbb{R}^{S\times d_k}`, false)}.
+     The ${kx(String.raw`1/\sqrt{d_k}`, false)} factor keeps the softmax temperature
+     well-behaved as ${kx(String.raw`d_k`, false)} grows.</p>
+
+  <p><b>3. Concatenate heads and project</b>:</p>
+  ${kx(String.raw`\mathrm{MSA}(x)=\big[\mathrm{Attn}_1\;\Vert\;\dots\;\Vert\;\mathrm{Attn}_h\big]\,W^O`)}
+  ${eqConcatSvg()}
+
+  <h5 style="margin:12px 0 4px">Putting it together (the full block flow)</h5>
   ${msaDiagramSvg()}
+  <p><b>${kx(String.raw`W^Q,W^K,W^V,W^O\in\mathbb{R}^{C\times C}`, false)}</b> are
+     the four learned linear layers of MSA. ${kx(String.raw`W^O`, false)} is the
+     <b>output projection</b>: after the ${kx(String.raw`h`, false)} heads each
+     produce a ${kx(String.raw`(S,d_k)`, false)} slice, they're concatenated on the
+     channel axis to ${kx(String.raw`(S,C)`, false)} and multiplied by
+     ${kx(String.raw`W^O`, false)}. Without it the heads would never mix — each
+     would only write to its own ${kx(String.raw`d_k`, false)} contiguous
+     channels — so ${kx(String.raw`W^O`, false)} blends them into a single
+     coherent vector before it gets added back into the residual stream.</p>
   <p class="hint">The frame-wise sub-block applies this with a block-diagonal
      mask over ${kx(String.raw`S`, false)} tokens; the global sub-block applies
      the exact same MSA but over ${kx(String.raw`N\!\cdot\!S`, false)} tokens
