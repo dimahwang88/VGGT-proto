@@ -136,6 +136,14 @@
         <div class="slider"><span>Layer</span>
           <input id="attnLayer" type="range" min="0" max="0" value="0" />
           <span class="val" id="attnLayerV">0</span></div>
+        <p class="hint" style="margin:4px 0 8px">
+          ⓘ The slider walks <b>captured snapshots</b>, not the aggregator's
+          ~24 raw blocks. VGGT only materializes a few intermediate layers
+          (the ones its DPT heads tap) and discards the rest to save memory,
+          so "Layer 0" = earliest exposed snapshot, "Layer N−1" = deepest.
+          To inspect every AA block you'd need to register forward hooks on the
+          installed <code>vggt</code> package.
+        </p>
         <div id="attnKind" class="hint"></div>
         <div class="heatRow">
           <div class="heatCell">query similarity<br /><img id="attnSim" alt="" /></div>
@@ -180,6 +188,6 @@
   }
 }
 </script>
-<script type="module" src="/app.js?v=23"></script>
+<script type="module" src="/app.js?v=25"></script>
 </body>
 </html>

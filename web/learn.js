@@ -451,6 +451,77 @@ function eqAttnSvg() {
   </svg>`;
 }
 
+// Concrete worked example: how MSA + residual changes the input tensor.
+// Reuses the same row-stochastic weights from the softmax demo so the two
+// examples are directly comparable.
+function attnEffectSvg() {
+  const X = [
+    [1.0, 0.0, 1.0, 0.0],   // token 0 — "edges + depth-cue"
+    [0.0, 1.0, 1.0, 0.0],   // token 1 — "color + depth-cue"
+    [1.0, 1.0, 0.0, 0.0],   // token 2 — "edges + color"
+    [0.0, 0.0, 1.0, 1.0],   // token 3 — "depth-cue + texture"
+  ];
+  const w = [
+    [0.51, 0.31, 0.07, 0.11],
+    [0.11, 0.49, 0.18, 0.22],
+    [0.024, 0.066, 0.80, 0.108],
+    [0.20, 0.15, 0.25, 0.40],
+  ];
+  // out = w · X  (we treat V_i = X here for clarity — values are a projection of x)
+  const out = w.map((row) =>
+    [0, 1, 2, 3].map((j) =>
+      row.reduce((acc, wij, k) => acc + wij * X[k][j], 0)
+    )
+  );
+  const Xn = X.map((row, i) => row.map((v, j) => v + out[i][j]));
+
+  const cell = 38, n = 4;
+  const grid = (x, y, mat, kind, hiRow = -1) => {
+    let s = "";
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        const v = mat[r][c];
+        let fill;
+        if (kind === "x") fill = `rgba(180,180,180,${0.15 + v * 0.55})`;
+        else if (kind === "out") fill = `rgba(255,82,82,${0.10 + v * 0.45})`;
+        else fill = `rgba(43,108,255,${0.08 + Math.min(v, 2) * 0.30})`;
+        s += `<rect x="${x + c * cell}" y="${y + r * cell}" width="${cell}" height="${cell}" fill="${fill}" stroke="${r === hiRow ? "#ffd400" : "#2a2c31"}" stroke-width="${r === hiRow ? 1.4 : 0.5}"/>`;
+        s += `<text x="${x + c * cell + cell / 2}" y="${y + r * cell + cell / 2 + 4}" text-anchor="middle" fill="#fff" font-size="11" font-weight="500">${v.toFixed(2)}</text>`;
+      }
+      s += `<text x="${x - 8}" y="${y + r * cell + cell / 2 + 4}" text-anchor="end" fill="#9aa0a6" font-size="10">t${r}</text>`;
+    }
+    return s;
+  };
+
+  const y = 50, gw = n * cell;
+  const x1 = 50, x2 = x1 + gw + 60, x3 = x2 + gw + 60;
+  return `
+  <svg viewBox="0 0 ${x3 + gw + 80} 260" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px">
+    <text x="${x1 + gw / 2}" y="${y - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">x  (input, S × C demo)</text>
+    <text x="${x1 + gw / 2}" y="${y - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">each row = one token's feature vector</text>
+    ${grid(x1, y, X, "x", 0)}
+
+    <text x="${(x1 + gw + x2) / 2}" y="${y + gw / 2 + 5}" text-anchor="middle" fill="#cfd2d6" font-size="22">+</text>
+
+    <text x="${x2 + gw / 2}" y="${y - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">MSA(LN(x))</text>
+    <text x="${x2 + gw / 2}" y="${y - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">= w · V — attention-mixed contribution</text>
+    ${grid(x2, y, out, "out", 0)}
+
+    <text x="${(x2 + gw + x3) / 2}" y="${y + gw / 2 + 5}" text-anchor="middle" fill="#cfd2d6" font-size="22">=</text>
+
+    <text x="${x3 + gw / 2}" y="${y - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">x ← x + MSA(LN(x))</text>
+    <text x="${x3 + gw / 2}" y="${y - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">refined token features</text>
+    ${grid(x3, y, Xn, "new", 0)}
+
+    <text x="${x1 + gw / 2}" y="${y + gw + 26}" text-anchor="middle" fill="#ffd400" font-size="11">
+      t0 (highlit): [1.00, 0.00, 1.00, 0.00]   →   [1.58, 0.38, 1.93, 0.11]
+    </text>
+    <text x="${x1 + gw / 2}" y="${y + gw + 42}" text-anchor="middle" fill="#9aa0a6" font-size="10">
+      dim 1 was 0 → now 0.38 — information from token 1 (color) leaked into token 0
+    </text>
+  </svg>`;
+}
+
 // Concrete worked example: tiny score matrix → softmax → weights, with
 // the actual numbers shown in each cell + per-row sums on the right.
 function softmaxDemoSvg() {
@@ -807,6 +878,56 @@ function renderAnatomy() {
      Every modern ViT/LLM (DINOv2, Llama, GPT-NeoX, …) is pre-LN; VGGT inherits this
      from ViT-L/14.</p>
 
+  <h5 style="margin:14px 0 4px">Why the residual <code>+ x</code>?</h5>
+  <p>Why <i>add</i> the sublayer output back to the input rather than just
+     <i>replace</i> it? Four reasons, ordered by impact — collectively known
+     as a <b>residual / skip connection</b> (ResNet, He et al. 2015; adopted by
+     Transformer, Vaswani et al. 2017):</p>
+
+  <div style="background:#1c2434;border-left:3px solid #2b6cff;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>1 — Gradient flow.</b> Without a residual, stacking ${kx(String.raw`L`, false)}
+    layers makes the back-prop gradient a long product
+    ${kx(String.raw`\prod_\ell f'_\ell(x_\ell)`, false)} that
+    <b>vanishes exponentially with depth</b>. With the residual the local
+    derivative becomes ${kx(String.raw`I + f'_\ell(x_\ell)`, false)} — the
+    ${kx(String.raw`I`, false)} term guarantees a clean gradient highway back to
+    early layers no matter what any sublayer does. Essential for a 24-block stack.
+  </div>
+
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>2 — Identity-friendly init.</b> At initialization MSA/MLP weights are
+    small/random, so ${kx(String.raw`\mathrm{MSA}(\mathrm{LN}(x))`, false)} is a
+    tiny perturbation. The residual makes
+    ${kx(String.raw`x + \text{small} \approx x`, false)}: the whole stack starts
+    as approximately the identity function and gradually learns useful
+    refinements. Without the residual every layer would scramble the signal
+    randomly at step 0 and training would be unstable.
+  </div>
+
+  <div style="background:#1c2434;border-left:3px solid #ff5252;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>3 — Sublayers learn deltas, not replacements.</b> Rearrange:
+    ${kx(String.raw`\;\mathrm{MSA}(\mathrm{LN}(x)) = x_{\text{new}} - x_{\text{old}}`, false)}.
+    The sublayer's job is to predict <b>"what should I add to refine the current
+    representation?"</b> — typically a much easier optimization problem than
+    "what is the right next representation from scratch?".
+  </div>
+
+  <div style="background:#1c2434;border-left:3px solid #ff9100;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>4 — The "residual stream" — a communication bus.</b> Think of the
+    residual as a shared bus running through every layer. Each sublayer
+    <i>reads</i> from it (via LN), <i>computes</i> something, and <i>writes
+    back</i> by adding. Information <b>accumulates rather than being
+    overwritten</b>; features at different abstraction levels coexist. For VGGT
+    this is what lets the aggregator carry geometric structure (position embeds,
+    camera-token signal, depth cues) through all 24 layers without losing it.
+    Mech-interp work (Anthropic and others) describes the entire transformer in
+    these terms.
+  </div>
+
+  <p class="hint">Net effect of stacking residuals: the model behaves like a
+     base signal (${kx(String.raw`x`, false)}) plus a sum of learned corrections
+     ${kx(String.raw`\sum_\ell f_\ell(\mathrm{LN}(x_\ell))`, false)}.</p>
+
   <h4 style="margin:18px 0 6px">Refresher — Multi-head Self-Attention (MSA)</h4>
   <p>Three learned linear projections turn each token into a <b>query</b>,
      <b>key</b>, and <b>value</b>. The set of all queries attend to the set of
@@ -923,6 +1044,26 @@ function renderAnatomy() {
        accumulation is exactly what the live <b>cross-frame mixing</b> bars
        further down visualize.</p>
   </div>
+
+  <h5 style="margin:14px 0 6px">Worked example — how the input tensor changes after MSA</h5>
+  <p>Tying the previous two demos together: take the same row-stochastic
+     weights ${kx(String.raw`w_i`, false)} from the softmax example and apply
+     them to a tiny input tensor ${kx(String.raw`x`, false)} with
+     ${kx(String.raw`S\!=\!4`, false)} tokens and a 4-dim feature axis (think of
+     each dim as a different feature channel). For clarity we set
+     ${kx(String.raw`V_i = x`, false)} — values are a projection of the input,
+     so this is the right shape of the effect even if not the exact computation.</p>
+  ${attnEffectSvg()}
+  <p class="hint">Token 0 originally has features ${kx(String.raw`[1.0,\,0.0,\,1.0,\,0.0]`, false)}
+     — it had <i>nothing</i> in dim 1. After the attention sub-block writes its
+     contribution back into the residual, token 0's dim 1 is
+     ${kx(String.raw`0.38`, false)}. That non-zero value came almost entirely
+     from token 1, which had ${kx(String.raw`1.0`, false)} in dim 1 and weight
+     ${kx(String.raw`w_{01}\!=\!0.31`, false)} in token 0's attention row. This
+     is "context-awareness" made concrete: <b>tokens pick up features from other
+     tokens they attended to</b>. Stack 24 of these blocks and far-reaching
+     features (e.g. "this patch is the same physical surface as that other
+     patch in another frame") can travel anywhere they're needed.</p>
 
   <p><b>3. Concatenate heads and project</b>:</p>
   ${kx(String.raw`\mathrm{MSA}(x)=\big[\mathrm{Attn}_1\;\Vert\;\dots\;\Vert\;\mathrm{Attn}_h\big]\,W^O`)}
