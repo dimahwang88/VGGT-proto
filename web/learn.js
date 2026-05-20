@@ -288,7 +288,7 @@ function applyGeom() {
 
 // --- Tabs ------------------------------------------------------------------
 function showSec(sec) {
-  for (const b of document.querySelectorAll("#learnBox .tabs button"))
+  for (const b of document.querySelectorAll("#learnView .tabs button"))
     b.classList.toggle("active", b.dataset.sec === sec);
   for (const s of document.querySelectorAll(".learn-sec"))
     s.classList.toggle("active", s.id === `sec-${sec}`);
@@ -300,12 +300,13 @@ function showSec(sec) {
 // --- Public entry ----------------------------------------------------------
 export async function initLearn(state, viewer) {
   ctx = { state, viewer };
-  $("learnBox").hidden = false;
+  // Visibility of #learnView is controlled by the Learn-VGGT toggle button
+  // in app.js — initLearn just builds/refreshes content.
 
   if (!built) {
     built = true;
 
-    for (const b of document.querySelectorAll("#learnBox .tabs button"))
+    for (const b of document.querySelectorAll("#learnView .tabs button"))
       b.addEventListener("click", () => showSec(b.dataset.sec));
 
     try {

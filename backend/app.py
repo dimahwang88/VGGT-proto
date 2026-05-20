@@ -181,7 +181,7 @@ async def api_introspect(
             data = await asyncio.to_thread(
                 introspect, scene, frame, layer, qx, qy
             )
-        except RuntimeError as exc:
+        except Exception as exc:
             if "out of memory" in str(exc).lower():
                 raise HTTPException(507, "GPU out of memory") from exc
             raise HTTPException(500, f"Introspection failed: {exc}") from exc

@@ -30,6 +30,17 @@ $("depthToggle").addEventListener("click", () => {
   $("depthToggle").textContent = `Depth: ${state.showDepth ? "on" : "off"}`;
   renderTracking();
 });
+$("learnToggle").addEventListener("click", () => {
+  const learn = $("learnView");
+  const view = $("viewer");
+  const showLearn = learn.hidden;
+  learn.hidden = !showLearn;
+  view.hidden = showLearn;
+  $("learnToggle").textContent = showLearn ? "Back to 3D view" : "Learn VGGT";
+  // Three.js sized to viewer's clientWidth at last resize. After swapping
+  // back, fire resize so the renderer rebinds to the now-visible cell.
+  if (!showLearn) window.dispatchEvent(new Event("resize"));
+});
 $("track").addEventListener("click", runTracking);
 $("clearPts").addEventListener("click", () => {
   state.queryPts = [];
@@ -100,20 +111,23 @@ async function reconstruct() {
 
     $("camBox").hidden = false;
     // Learn-mode is optional: dynamic-import + swallow errors so a failure
-    // in learn.js or its CDN deps can never block reconstruction. Unhide
-    // the panel up front so we can also show a fallback note on failure.
-    const learnBox = $("learnBox");
-    learnBox.hidden = false;
-    import("/learn.js?v=4")
-      .then((m) => m.initLearn(state, viewer))
+    // in learn.js or its CDN deps can never block reconstruction. The
+    // Learn-VGGT toggle button reveals the right-pane panel when ready.
+    const learnView = $("learnView");
+    import("/learn.js?v=5")
+      .then((m) => {
+        m.initLearn(state, viewer);
+        $("learnToggle").disabled = false;
+      })
       .catch((e) => {
         console.warn("Learn-mode unavailable:", e);
-        learnBox.innerHTML =
-          '<summary>Learn VGGT</summary>' +
+        learnView.querySelector(".learn-inner").innerHTML =
+          '<h2>Learn VGGT</h2>' +
           '<p class="err">Learn-mode failed to load — check the browser ' +
           'console for the failing module. Most often: <code>web/learn.js</code> ' +
           'or one of its CDN deps (mermaid, katex, chart.js) didn\'t reach the pod.</p>' +
           `<p class="hint">${e.message || e}</p>`;
+        $("learnToggle").disabled = false; // still let user see the message
       });
     $("flip").disabled = false;
     $("depthToggle").disabled = false;

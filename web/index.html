@@ -41,11 +41,13 @@
   .err { color: #ff6b6b; }
   details summary { cursor: pointer; margin-top: 12px; }
   .hint { color: #9aa0a6; font-size: 12px; }
-  /* Learn mode */
-  #learnBox .tabs { display: flex; flex-direction: row; gap: 4px; margin: 10px 0; flex-wrap: wrap; }
-  #learnBox .tabs button { padding: 5px 9px; font-size: 12px; }
-  #learnBox .tabs button.active { background: #2b6cff; }
-  #learnBox .tabs button:not(.active) { background: #34373d; }
+  /* Learn mode — occupies the same grid cell as #viewer; toggled via #learnToggle */
+  #learnView { grid-column: 2; grid-row: 1; overflow: auto; background: #121316; }
+  #learnView .learn-inner { padding: 20px 24px; max-width: 1000px; margin: 0 auto; }
+  #learnView .tabs { display: flex; flex-direction: row; gap: 4px; margin: 10px 0; flex-wrap: wrap; }
+  #learnView .tabs button { padding: 5px 9px; font-size: 12px; }
+  #learnView .tabs button.active { background: #2b6cff; }
+  #learnView .tabs button:not(.active) { background: #34373d; }
   .learn-sec { display: none; }
   .learn-sec.active { display: block; }
   #archGraph { background: #1c1e22; border-radius: 6px; padding: 8px; overflow-x: auto; }
@@ -56,8 +58,9 @@
             border-radius: 3px; font-size: 12px; color: #9ad; }
   .heatRow { display: flex; flex-direction: row; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
   .heatCell { text-align: center; font-size: 11px; color: #9aa0a6; }
-  .heatCell canvas, .heatCell img { width: 150px; image-rendering: pixelated;
+  .heatCell canvas, .heatCell img { width: 240px; image-rendering: pixelated;
             border: 1px solid #2a2c31; border-radius: 4px; display: block; }
+  #attnPick { max-width: 640px; }
   #attnPick { width: 100%; display: block; cursor: crosshair;
             border: 1px solid #2a2c31; border-radius: 4px; margin-top: 6px; }
   .slider { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
@@ -78,6 +81,7 @@
       <button id="run">Reconstruct</button>
       <button id="flip" class="secondary" disabled>Flip vertical</button>
       <button id="depthToggle" class="secondary" disabled>Depth: off</button>
+      <button id="learnToggle" class="secondary" disabled>Learn VGGT</button>
       <button id="dlGlb" class="secondary" disabled>Download GLB</button>
       <button id="dlCam" class="secondary" disabled>Cameras JSON</button>
     </div>
@@ -99,8 +103,13 @@
       <div id="cams"></div>
     </details>
 
-    <details id="learnBox" open hidden>
-      <summary>Learn VGGT</summary>
+  </section>
+
+  <section id="viewer"></section>
+
+  <section id="learnView" hidden>
+    <div class="learn-inner">
+      <h2 style="margin:0 0 4px">Learn VGGT</h2>
       <p class="hint">Architecture, attention, the math, and the training
         recipe — illustrated on your loaded scene.</p>
       <div class="tabs">
@@ -144,17 +153,15 @@
           <input id="gDepth" type="range" min="1" max="100" value="30" />
           <span class="val" id="gDepthV">—</span></div>
         <p class="hint">Drives a teaching frustum + principal ray on the
-          selected camera in the 3D view.</p>
+          selected camera in the 3D view (visible when you switch back).</p>
       </div>
 
       <div id="sec-train" class="learn-sec">
         <canvas id="dataMix" height="220"></canvas>
         <div id="trainNotes"></div>
       </div>
-    </details>
+    </div>
   </section>
-
-  <section id="viewer"></section>
 
   <section id="trackStrip" hidden>
     <canvas id="stripCanvas"></canvas>
@@ -171,6 +178,6 @@
   }
 }
 </script>
-<script type="module" src="/app.js?v=10"></script>
+<script type="module" src="/app.js?v=11"></script>
 </body>
 </html>

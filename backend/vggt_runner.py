@@ -275,9 +275,21 @@ def introspect(scene: Scene, frame: int, layer: int, qx: float, qy: float) -> di
     if toks is None:
         raise RuntimeError("Scene tokens were released — reconstruct again.")
 
-    n_layers = len(toks)
+    # VGGT's aggregator can return a list with None entries (only some layers
+    # are materialized). Keep only the real tensors and remember each one's
+    # original layer index for the frame-wise/global kind heuristic.
+    if isinstance(toks, (list, tuple)):
+        captured = [(i, x) for i, x in enumerate(toks) if x is not None]
+    else:
+        captured = [(0, toks)]
+    if not captured:
+        raise RuntimeError("No aggregator tokens were retained.")
+
+    n_layers = len(captured)
     layer = max(0, min(int(layer), n_layers - 1))
-    t = toks[layer]
+    orig_idx, t = captured[layer]
+    if t.dim() == 3:
+        t = t.unsqueeze(0)  # (N,S,C) -> (1,N,S,C)
     if t.dim() != 4:
         raise RuntimeError(
             f"Unexpected token shape {tuple(t.shape)} (expected (B,N,S,C))."
@@ -314,7 +326,9 @@ def introspect(scene: Scene, frame: int, layer: int, qx: float, qy: float) -> di
     return {
         "layer": layer,
         "num_layers": n_layers,
-        "layer_kind": "frame-wise" if layer % 2 == 0 else "global",
+        # Heuristic on the *original* layer index (the captured list may skip
+        # entries); alternating-attention pairs frame ↔ global.
+        "layer_kind": "frame-wise" if orig_idx % 2 == 0 else "global",
         "grid": [gh, gw],
         "frame": frame,
         "num_frames": n_img,
