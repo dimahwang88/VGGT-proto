@@ -372,49 +372,82 @@ function eqProjSvg() {
 }
 
 // Eq 2:  Attn_i(Q,K,V) = softmax( Q_i K_iᵀ / √d_k ) V_i  — per-head attention.
+// Includes a "slice indicator" above Q_i showing it is the i-th column-slice
+// of the full Q from Eq 1.
 function eqAttnSvg() {
-  // S=50 tall, d_k=18 thin.
   const S = 50, dk = 18;
-  // Row 1:  Q_i · K_iᵀ = A_i
-  const r1y = 20;
-  const qX = 60, kX = qX + dk + 50, aX = kX + S + 50;
-  const r1End = aX + S + 30;
-  // Row 2:  softmax(A_i / √d_k) = w_i,  then  w_i · V_i = out
-  const r2y = 130;
-  const wX = 60, vX = wX + S + 50, oX = vX + dk + 50;
-  // soft-max heatmap effect on the weights box: faint horizontal stripes.
+  // Slice indicator (mini wide Q split into h column slices, slice i highlit).
+  const sliceY = 22, sliceH = 18, sliceW = 160, hShown = 8, sliceI = 3;
+  const cellW = sliceW / hShown;
+  // Row 1: Q_i · K_iᵀ = A_i — shifted down to make room for indicator.
+  const r1y = 80;
+  const qX = 100, kX = qX + dk + 60, aX = kX + S + 60;
+  // centre the slice indicator on the Q_i column
+  const indX = qX + dk / 2 - sliceW / 2;
+  const hiX = indX + sliceI * cellW;
+  let slices = "";
+  for (let i = 0; i < hShown; i++) {
+    const fill = i === sliceI ? "#ff5252" : "#23272f";
+    slices += `<rect x="${indX + i * cellW}" y="${sliceY}" width="${cellW - 0.7}" height="${sliceH}" fill="${fill}" stroke="#2a2c31" stroke-width="0.5"/>`;
+  }
+  // Row 2: softmax(A_i / √d_k) = w_i,  then  w_i · V_i = out
+  const r2y = 190;
+  const wX = 100, vX = wX + S + 60, oX = vX + dk + 60;
   const wHeatmap = Array.from({ length: 6 }, (_, i) =>
     `<rect x="${wX}" y="${r2y + (i + 0.5) * (S / 7) - 1}" width="${S}" height="${(S / 8) | 0}" fill="#ffd400" opacity="${0.15 + 0.08 * i}"/>`
   ).join("");
   return `
-  <svg viewBox="0 0 ${oX + dk + 60} 220" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
-    <!-- Row 1: scores -->
-    ${mBox(qX, r1y, dk, S, "#ff5252", "Qᵢ", "S", "dₖ")}
-    ${mSym(qX + dk + 25, r1y + S / 2 + 7, "·")}
-    ${mBox(kX, r1y, S, dk, "#4caf50", "Kᵢᵀ", "dₖ", "S")}
-    ${mSym(kX + S + 25, r1y + S / 2 + 7, "=")}
-    ${mBox(aX, r1y, S, S, "#23272f", "Aᵢ", "S", "S")}
-    <text x="${aX + S + 6}" y="${r1y + S / 2 + 4}" fill="#9aa0a6" font-size="11">
-      "scores"  Aᵢ = QᵢKᵢᵀ
-    </text>
-    <!-- softmax arrow -->
-    <line x1="${aX + S / 2}" y1="${r1y + S + 6}" x2="${wX + S / 2}" y2="${r2y - 6}"
-          stroke="#ffd400" stroke-width="1.4" marker-end="url(#ax)"/>
-    <text x="${(aX + S / 2 + wX + S / 2) / 2 + 4}" y="${(r1y + S + r2y) / 2}"
-          fill="#ffd400" font-size="11">softmax( · / √dₖ )</text>
-    <!-- Row 2: weighted V -->
-    ${mBox(wX, r2y, S, S, "#23272f", "wᵢ", "S", "S")}
-    ${wHeatmap}
-    ${mSym(wX + S + 25, r2y + S / 2 + 7, "·")}
-    ${mBox(vX, r2y, dk, S, "#2b6cff", "Vᵢ", "S", "dₖ")}
-    ${mSym(vX + dk + 25, r2y + S / 2 + 7, "=")}
-    ${mBox(oX, r2y, dk, S, "#ff9100", "Attnᵢ", "S", "dₖ")}
+  <svg viewBox="0 0 ${oX + dk + 80} 290" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
     <defs>
       <marker id="ax" markerWidth="8" markerHeight="8" refX="6" refY="4"
               orient="auto" markerUnits="strokeWidth">
         <path d="M0,0 L0,8 L8,4 z" fill="#ffd400"/>
       </marker>
+      <marker id="qs" markerWidth="8" markerHeight="8" refX="6" refY="4"
+              orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#ff5252"/>
+      </marker>
     </defs>
+
+    <!-- Slice indicator: Q split into h column-strips, slice i highlighted -->
+    <text x="${indX + sliceW / 2}" y="${sliceY - 6}" text-anchor="middle"
+          fill="#9aa0a6" font-size="10">
+      full Q from Eq 1 (width C)  =  [ Q₁ | Q₂ | … | Qₕ ]   — column-slices of width dₖ
+    </text>
+    ${slices}
+    <line x1="${hiX + cellW / 2}" y1="${sliceY + sliceH + 2}"
+          x2="${qX + dk / 2}" y2="${r1y - 4}"
+          stroke="#ff5252" stroke-width="1.4" marker-end="url(#qs)"/>
+    <text x="${hiX + cellW + 4}" y="${(sliceY + sliceH + r1y) / 2 + 4}"
+          fill="#ff5252" font-size="11">slice i  →  Qᵢ</text>
+
+    <!-- Row 1: scores -->
+    ${mBox(qX, r1y, dk, S, "#ff5252", "Qᵢ", "S", "dₖ")}
+    ${mSym(qX + dk + 30, r1y + S / 2 + 7, "·")}
+    ${mBox(kX, r1y, S, dk, "#4caf50", "Kᵢᵀ", "dₖ", "S")}
+    ${mSym(kX + S + 30, r1y + S / 2 + 7, "=")}
+    ${mBox(aX, r1y, S, S, "#23272f", "Aᵢ", "S", "S")}
+    <text x="${aX + S + 6}" y="${r1y + S / 2 + 4}" fill="#9aa0a6" font-size="11">
+      "scores"  Aᵢ = QᵢKᵢᵀ
+    </text>
+
+    <!-- softmax arrow -->
+    <line x1="${aX + S / 2}" y1="${r1y + S + 6}" x2="${wX + S / 2}" y2="${r2y - 6}"
+          stroke="#ffd400" stroke-width="1.4" marker-end="url(#ax)"/>
+    <text x="${(aX + S / 2 + wX + S / 2) / 2 + 4}" y="${(r1y + S + r2y) / 2}"
+          fill="#ffd400" font-size="11">softmax( · / √dₖ )</text>
+
+    <!-- Row 2: weighted V -->
+    ${mBox(wX, r2y, S, S, "#23272f", "wᵢ", "S", "S")}
+    ${wHeatmap}
+    ${mSym(wX + S + 30, r2y + S / 2 + 7, "·")}
+    ${mBox(vX, r2y, dk, S, "#2b6cff", "Vᵢ", "S", "dₖ")}
+    ${mSym(vX + dk + 30, r2y + S / 2 + 7, "=")}
+    ${mBox(oX, r2y, dk, S, "#ff9100", "Attnᵢ", "S", "dₖ")}
+    <text x="${(wX + oX + dk) / 2}" y="${r2y + S + 28}" text-anchor="middle"
+          fill="#9aa0a6" font-size="11">
+      analogous slices: Kᵢ from K, Vᵢ from V (same column-slice index i)
+    </text>
   </svg>`;
 }
 
@@ -718,6 +751,35 @@ function renderAnatomy() {
 
   <p><b>2. Per-head attention</b> — within a single head ${kx(String.raw`i`, false)},
      queries score against keys, softmax-normalize, then take a weighted sum of values:</p>
+
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:8px 0;font-size:13px">
+    <div style="font-weight:600;margin-bottom:4px">${kx(String.raw`C`, false)} vs ${kx(String.raw`d_k`, false)} — easy to confuse, important to keep straight</div>
+    <table style="border-collapse:collapse;font-size:12px;margin-top:4px">
+      <tr>
+        <td style="padding:3px 12px 3px 0">${kx(String.raw`C`, false)}</td>
+        <td style="padding:3px 12px 3px 0">full hidden dim — the model width</td>
+        <td style="padding:3px 0;color:#9ad">1024</td>
+      </tr>
+      <tr>
+        <td style="padding:3px 12px 3px 0">${kx(String.raw`d_k`, false)}</td>
+        <td style="padding:3px 12px 3px 0"><b>per-head</b> dim — a slice of ${kx(String.raw`C`, false)}: ${kx(String.raw`d_k=C/h`, false)}</td>
+        <td style="padding:3px 0;color:#9ad">1024/16 = <b>64</b></td>
+      </tr>
+    </table>
+    <p style="margin:6px 0 0;color:#cfd2d6">
+      Eq 1 (projection) and Eq 3 (concat + ${kx(String.raw`W^O`, false)}) operate
+      at <b>full width ${kx(String.raw`C`, false)}</b>. Eq 2 (per-head
+      attention) operates at the <b>narrower ${kx(String.raw`d_k`, false)}</b>
+      — that's why ${kx(String.raw`Q_i, K_i, V_i`, false)} are drawn as thin
+      bars below: each head sees only ${kx(String.raw`64`, false)} of the
+      ${kx(String.raw`1024`, false)} channels. The score matrix
+      ${kx(String.raw`A_i\in\mathbb{R}^{S\times S}`, false)} has no ${kx(String.raw`C`, false)} or
+      ${kx(String.raw`d_k`, false)} in its shape at all — ${kx(String.raw`d_k`, false)}
+      survives only inside the ${kx(String.raw`1/\sqrt{d_k}`, false)}
+      temperature scaling.
+    </p>
+  </div>
+
   ${kx(String.raw`\mathrm{Attn}_i(Q,K,V)=\mathrm{softmax}\!\Big(\frac{Q_iK_i^{\!\top}}{\sqrt{d_k}}\Big)\,V_i`)}
   ${eqAttnSvg()}
   <p class="hint">The grey ${kx(String.raw`S\!\times\!S`, false)} block is the
