@@ -104,7 +104,7 @@ async function reconstruct() {
     // the panel up front so we can also show a fallback note on failure.
     const learnBox = $("learnBox");
     learnBox.hidden = false;
-    import("/learn.js?v=3")
+    import("/learn.js?v=4")
       .then((m) => m.initLearn(state, viewer))
       .catch((e) => {
         console.warn("Learn-mode unavailable:", e);
