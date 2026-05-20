@@ -1,5 +1,4 @@
 import { Viewer } from "/viewer.js?v=5";
-import { initLearn } from "/learn.js?v=1";
 
 const $ = (id) => document.getElementById(id);
 const viewer = new Viewer($("viewer"));
@@ -60,7 +59,12 @@ async function reconstruct() {
   for (const f of files) fd.append("images", f);
 
   $("run").disabled = true;
-  setStatus(`Reconstructing ${files.length} image(s)…`);
+  const baseMsg = `Reconstructing ${files.length} image(s)…`;
+  const t0 = performance.now();
+  const elapsed = () => ((performance.now() - t0) / 1000).toFixed(1);
+  const tick = () => setStatus(`${baseMsg} ${elapsed()}s`);
+  tick();
+  const timer = setInterval(tick, 100);
   try {
     const res = await fetch("/api/reconstruct", { method: "POST", body: fd });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
@@ -95,17 +99,25 @@ async function reconstruct() {
     renderCameraTable();
 
     $("camBox").hidden = false;
-    initLearn(state, viewer);
+    // Learn-mode is optional: dynamic-import + swallow errors so a failure
+    // in learn.js or its CDN deps can never block reconstruction.
+    import("/learn.js?v=2")
+      .then((m) => m.initLearn(state, viewer))
+      .catch((e) => console.warn("Learn-mode unavailable:", e));
     $("flip").disabled = false;
     $("depthToggle").disabled = false;
     $("dlGlb").disabled = false;
     $("dlCam").disabled = false;
     $("track").disabled = false;
     $("clearPts").disabled = false;
-    setStatus(`Done — ${data.num_images} cameras, point cloud loaded.`);
+    clearInterval(timer);
+    setStatus(
+      `Done — ${data.num_images} cameras, point cloud loaded (${elapsed()}s).`
+    );
   } catch (e) {
-    setStatus(`Reconstruction failed: ${e.message}`, true);
+    setStatus(`Reconstruction failed after ${elapsed()}s: ${e.message}`, true);
   } finally {
+    clearInterval(timer);
     $("run").disabled = false;
   }
 }
