@@ -100,10 +100,21 @@ async function reconstruct() {
 
     $("camBox").hidden = false;
     // Learn-mode is optional: dynamic-import + swallow errors so a failure
-    // in learn.js or its CDN deps can never block reconstruction.
-    import("/learn.js?v=2")
+    // in learn.js or its CDN deps can never block reconstruction. Unhide
+    // the panel up front so we can also show a fallback note on failure.
+    const learnBox = $("learnBox");
+    learnBox.hidden = false;
+    import("/learn.js?v=3")
       .then((m) => m.initLearn(state, viewer))
-      .catch((e) => console.warn("Learn-mode unavailable:", e));
+      .catch((e) => {
+        console.warn("Learn-mode unavailable:", e);
+        learnBox.innerHTML =
+          '<summary>Learn VGGT</summary>' +
+          '<p class="err">Learn-mode failed to load — check the browser ' +
+          'console for the failing module. Most often: <code>web/learn.js</code> ' +
+          'or one of its CDN deps (mermaid, katex, chart.js) didn\'t reach the pod.</p>' +
+          `<p class="hint">${e.message || e}</p>`;
+      });
     $("flip").disabled = false;
     $("depthToggle").disabled = false;
     $("dlGlb").disabled = false;
