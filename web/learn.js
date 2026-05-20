@@ -40,83 +40,201 @@ const ARCH_GRAPH = `flowchart TD
 const ARCH = {
   img: {
     t: "Input & coordinate frame",
-    h: `<p>VGGT ingests <b>1–N</b> RGB views jointly in a single forward pass.
-    All predictions live in the coordinate frame of the <b>first camera</b>
-    (camera&nbsp;1 = world). That is exactly why this app's tracking has a
-    fast path when the reference frame is index&nbsp;0.</p>`,
+    h: `<p>VGGT ingests a batched stack of ${kx(String.raw`N`, false)} views
+    as one tensor:</p>
+    ${kx(String.raw`\mathbf{I}\in\mathbb{R}^{B\times N\times 3\times H\times W},\quad B=1,\quad H,W\equiv 0\bmod 14`)}
+    <p>Preprocessing (<code>vggt/utils/load_fn.py</code> →
+    <code>load_and_preprocess_images</code>): resize so the longer side is the
+    configured target, pad to a multiple of the patch size (14), normalize to
+    DINOv2 mean/std. EXIF orientation is applied <i>by this app</i> before the
+    call (see <code>backend/app.py</code> — the model itself doesn't honor
+    EXIF).</p>
+    <p><b>Coordinate frame.</b> All extrinsics, depth, and point predictions
+    are expressed in the world frame defined as <b>camera 1 = identity</b>.
+    The first camera token is special-cased inside the aggregator (it
+    anchors the global frame). This is the exact reason the tracker's
+    "fast path" works only when the reference frame is index&nbsp;0 — the
+    pre-computed tokens already live in that frame.</p>`,
   },
+
   patch: {
-    t: "Tokenization (DINOv2)",
-    h: `<p><b>Refresher — ViT patching:</b> each image is split into
-    14×14 patches; a linear projection turns every patch into a token. VGGT
-    initializes this backbone from <b>DINOv2 ViT-L</b> (self-supervised
-    features). Per image it appends one learnable <b>camera token</b> and
-    4 <b>register tokens</b> (register tokens absorb artefacts — from
-    "Vision Transformers Need Registers").</p>
-    <p>Token count per image: ${kx(String.raw`S = 1_{\text{cam}} + 4_{\text{reg}} + \tfrac{H}{14}\cdot\tfrac{W}{14}`, false)} patches.</p>
-    <p><code>vggt/models/aggregator.py</code></p>`,
-  },
-  agg: {
-    t: "Alternating-Attention Aggregator (the core idea)",
-    h: `<p><b>Refresher — attention:</b> ${kx(String.raw`\mathrm{Attn}(Q,K,V)=\mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right)V`)}</p>
-    <p>The aggregator stacks <b>L</b> blocks that <b>alternate</b> between:</p>
+    t: "Tokenization (DINOv2 ViT-L/14 + special tokens)",
+    h: `<p><b>1. Patch embedding.</b> A single conv strides over the image:</p>
+    ${kx(String.raw`\text{PatchEmbed}: \;\text{Conv2d}(3\to C,\;k=14,\;s=14),\quad C\approx 1024`)}
+    <p>so an image (3, H, W) becomes patch tokens
+    ${kx(String.raw`\big(\tfrac{H}{14}\!\cdot\!\tfrac{W}{14}=P,\;C\big)`, false)}.
+    Weights init from <b>DINOv2 ViT-L/14</b> (self-supervised, registers
+    variant).</p>
+    <p><b>2. Special tokens (per image).</b> The aggregator prepends learned
+    tokens to every image:</p>
     <ul>
-      <li><b>Frame-wise</b> self-attention — tokens attend only within their
-      own image (per-view structure, cheap: cost ${kx(String.raw`O(N\,S^2)`, false)}).</li>
-      <li><b>Global</b> self-attention — all tokens of all images attend to
-      each other (cross-view fusion: cost ${kx(String.raw`O((NS)^2)`, false)}).</li>
+      <li><b>1× camera token</b> — later read by the camera head.</li>
+      <li><b>4× register tokens</b> — absorb high-norm artefacts (Darcet et al.
+      2023, "Vision Transformers Need Registers"); they exist so patch tokens
+      stay clean.</li>
     </ul>
-    <p>Alternating gives multi-view reasoning without the full cost of
-    always-global attention. The <b>Attention</b> tab visualizes this: the
-    "cross-frame mixing" of a query token grows as you step deeper —
-    that rise <i>is</i> global attention fusing the views.</p>
-    <p><code>vggt/models/aggregator.py</code></p>`,
+    <p>Total length per image:
+    ${kx(String.raw`S = \underbrace{1}_{\text{cam}} + \underbrace{4}_{\text{reg}} + P`, false)}.
+    The aggregator returns the <b>patch start index</b>
+    ${kx(String.raw`\texttt{ps\_idx}=5`, false)} so heads know where patch
+    tokens begin. The batched layout the aggregator works on is</p>
+    ${kx(String.raw`\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}`)}
+    <p><b>3. Positional info.</b> 2-D sinusoidal / DINOv2 pos-embed is added
+    to patch tokens; camera & register tokens get their own learned position
+    embeddings. Source: <code>vggt/models/aggregator.py</code>.</p>`,
   },
+
+  agg: {
+    t: "Alternating-Attention Aggregator (the engine)",
+    h: `<p><b>Refresher — pre-LN transformer block:</b></p>
+    ${kx(String.raw`\begin{aligned}
+       \mathbf{x} &\leftarrow \mathbf{x} + \mathrm{MSA}(\mathrm{LN}(\mathbf{x}))\\
+       \mathbf{x} &\leftarrow \mathbf{x} + \mathrm{MLP}(\mathrm{LN}(\mathbf{x}))
+       \end{aligned}`)}
+    <p>with ${kx(String.raw`\mathrm{MSA}(x)=\bigoplus_{h=1}^{H}\mathrm{Attn}(xW^Q_h, xW^K_h, xW^V_h)\,W^O,\;\;
+       \mathrm{Attn}(Q,K,V)=\mathrm{softmax}(QK^\top/\sqrt{d_k})V`)}
+       and ${kx(String.raw`\mathrm{MLP}(x)=W_2\,\mathrm{GELU}(W_1 x)`, false)}, MLP ratio = 4.</p>
+    <p><b>The VGGT twist.</b> Each aggregator block contains <b>two</b>
+    such sub-blocks back-to-back; the only difference between them is which
+    tokens are allowed to attend to which. Given input
+    ${kx(String.raw`\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}`, false)}:</p>
+    <pre style="background:#0d0e10;padding:8px;border-radius:4px;font-size:12px;line-height:1.4">
+<span style="color:#9ad">def</span> aa_block(X):                          <span style="color:#7a8">// shape (B,N,S,C)</span>
+    <span style="color:#7a8"># --- frame-wise sub-block ---</span>
+    Xf = X.reshape(B*N, S, C)              <span style="color:#7a8">// each image isolated</span>
+    Xf = Xf + MSA<sub>frame</sub>(LN(Xf))            <span style="color:#7a8">// mask = block-diagonal</span>
+    Xf = Xf + MLP<sub>frame</sub>(LN(Xf))
+    X  = Xf.reshape(B, N, S, C)
+    <span style="color:#7a8"># --- global sub-block ---</span>
+    Xg = X.reshape(B, N*S, C)              <span style="color:#7a8">// all tokens, all images</span>
+    Xg = Xg + MSA<sub>global</sub>(LN(Xg))           <span style="color:#7a8">// full attention</span>
+    Xg = Xg + MLP<sub>global</sub>(LN(Xg))
+    <span style="color:#9ad">return</span> Xg.reshape(B, N, S, C)</pre>
+    <p><b>Costs.</b> Frame-wise:
+    ${kx(String.raw`\mathcal{O}(N\cdot S^2 \cdot C)`, false)};
+    global: ${kx(String.raw`\mathcal{O}((NS)^2 \cdot C)`, false)}. Alternating
+    avoids paying the global cost twice as often as needed while still fusing
+    views every block.</p>
+    <p><b>Stack.</b> The public 1B checkpoint uses ${kx(String.raw`L\approx 24`, false)}
+    AA blocks at ViT-L/14 dims ${kx(String.raw`(C\!=\!1024,\;\text{heads}\!=\!16,\;\text{MLP}\!\times\!4)`, false)}
+    initialized from DINOv2. Exact numbers for your installed checkpoint live
+    in <code>vggt/models/aggregator.py</code>.</p>
+    <p>The block-diagram in the <b>Attention</b> tab visualizes the two masks
+    and the reshape steps end-to-end.</p>`,
+  },
+
   cam: {
-    t: "Camera head",
-    h: `<p>Reads the per-image <b>camera token</b> and applies a small trunk
-    <b>iteratively (4 passes)</b>, each refining a 9-D <b>pose encoding</b>:
-    ${kx(String.raw`\;[\,\mathbf{t}\in\mathbb{R}^3,\; \mathbf{q}\in\mathbb{R}^4,\; \text{FOV}\in\mathbb{R}^2\,]`, false)}.</p>
-    <p>Decoded to extrinsics/intrinsics by
-    <code>pose_encoding_to_extri_intri</code> — the same util this app calls
-    in <code>vggt_runner.reconstruct</code>. Principal point is the image
-    center; focal comes from FOV (see the <b>Geometry math</b> tab).</p>
-    <p><code>vggt/heads/camera_head.py</code>, <code>vggt/utils/pose_enc.py</code></p>`,
+    t: "Camera head — iterative pose regression",
+    h: `<p>Reads only the ${kx(String.raw`N`, false)} camera tokens (one per
+    image), pulled from the aggregator at <code>ps_idx − 5</code>:</p>
+    ${kx(String.raw`\mathbf{c}\in\mathbb{R}^{B\times N\times C}`)}
+    <p><b>1. Cross-view trunk.</b> A small transformer attends <i>across the N
+    camera tokens</i> — so the cameras "talk to each other" and the predicted
+    poses become mutually consistent (you can't pick a per-image pose
+    independently; the trunk enforces a joint solution).</p>
+    <p><b>2. Iterative refinement.</b> The trunk is run ${kx(String.raw`T=4`, false)}
+    times, each pass predicting a residual update
+    ${kx(String.raw`\Delta\boldsymbol{\theta}_t`, false)} on top of the previous
+    pose-encoding estimate ${kx(String.raw`\boldsymbol{\theta}_{t-1}`, false)}
+    (a learned unrolled optimizer, in the spirit of GANs/Plucker-net heads):</p>
+    ${kx(String.raw`\boldsymbol{\theta}_t = \boldsymbol{\theta}_{t-1} + \Delta\boldsymbol{\theta}_t,\quad
+                    \boldsymbol{\theta}\in\mathbb{R}^{9}=[\,\mathbf{t}\;|\;\mathbf{q}\;|\;\text{FOV}_x,\text{FOV}_y\,]`)}
+    <p>Camera 1 is gauge-fixed to identity (its prediction is overwritten by
+    the canonical pose). The official wrapper returns a length-T list and the
+    repo uses <code>[-1]</code> — see <code>vggt_runner.reconstruct</code>.</p>
+    <p><b>3. Decoding to ${kx(String.raw`(R,\mathbf{t},K)`, false)}.</b>
+    The quaternion is normalized then expanded (formula in the Geometry tab);
+    intrinsics: principal point at ${kx(String.raw`(W/2,H/2)`, false)}, focal
+    from FOV: ${kx(String.raw`f_x=(W/2)/\tan(\text{FOV}_x/2)`, false)}. Done by
+    <code>vggt/utils/pose_enc.py::pose_encoding_to_extri_intri</code>.</p>
+    <p>Source: <code>vggt/heads/camera_head.py</code>.</p>`,
   },
+
   depth: {
-    t: "DPT depth head",
-    h: `<p><b>Refresher — DPT:</b> a Dense Prediction Transformer reassembles
-    tokens from several aggregator layers into a multi-scale feature pyramid,
-    then convolutionally decodes a dense per-pixel map.</p>
-    <p>Outputs per-pixel <b>depth</b> + an <b>aleatoric confidence</b> σ. The
-    point cloud you see is depth <i>unprojected</i> to 3D (more stable than
-    the direct point head) — see <code>unproject_depth_map_to_point_map</code>.
-    The <b>Depth: on</b> toggle shows this head's output.</p>
-    <p><code>vggt/heads/dpt_head.py</code></p>`,
+    t: "DPT depth head — token reassembly",
+    h: `<p><b>Refresher — DPT</b> (Ranftl et al. 2021). Take patch tokens from
+    several transformer layers, project them, reshape (P, C) ↦
+    ${kx(String.raw`(C',\tfrac{H}{14},\tfrac{W}{14})`, false)}, and use
+    transposed/regular convs to produce a multi-scale feature pyramid that an
+    FPN-style fusion module ("RefineNet") upsamples to the input resolution.</p>
+    <p>VGGT taps <b>4 aggregator layers</b> (e.g., layers {4, 11, 17, 23} —
+    early to late). For each, per image:</p>
+    ${kx(String.raw`
+       \underbrace{(P,C)}_{\text{patch tokens at layer }\ell}\;\xrightarrow{\text{1×1 conv}}\;
+       (C'_\ell,P)\;\xrightarrow{\text{reshape}}\;
+       (C'_\ell,\tfrac{H}{14},\tfrac{W}{14})\;\xrightarrow{\text{up/down}}\;
+       (C'_\ell,\tfrac{H}{s_\ell},\tfrac{W}{s_\ell})`)}
+    <p>with strides ${kx(String.raw`s_\ell\in\{4,8,16,32\}`, false)}. RefineNet
+    fuses them coarse→fine into a single ${kx(String.raw`(C_o,H,W)`, false)} map,
+    finally projected to two channels:</p>
+    ${kx(String.raw`\hat{d}(u,v)\in\mathbb{R}_{>0},\qquad \hat{\sigma}(u,v)\in\mathbb{R}_{>0}`)}
+    <p><b>Aleatoric confidence.</b> ${kx(String.raw`\hat{\sigma}`, false)} is the
+    Laplacian scale used at training: pixels VGGT is uncertain about (textureless
+    regions, occlusions) are down-weighted in the loss
+    ${kx(String.raw`\mathcal{L}=|\hat{d}-d|\cdot e^{-\hat{\sigma}}+\alpha\hat{\sigma}`, false)}
+    (see Training tab). At inference, ${kx(String.raw`\hat{\sigma}`, false)} is what the
+    confidence-floor in <code>vggt_runner.reconstruct</code> filters on to keep
+    only trustworthy points in the GLB.</p>
+    <p>Source: <code>vggt/heads/dpt_head.py</code>.</p>`,
   },
+
   point: {
-    t: "DPT point head",
-    h: `<p>A second DPT head regresses a <b>point map</b> (3D point per pixel
-    in the camera-1 frame) + confidence. VGGT supervises it, but the paper
-    finds depth→unprojection more accurate for the final cloud, which is the
-    convention this app follows.</p>
-    <p><code>vggt/heads/dpt_head.py</code></p>`,
+    t: "DPT point head (the 'direct' 3D)",
+    h: `<p>Identical DPT decoder structure to the depth head but with a 3-channel
+    output ${kx(String.raw`\hat{\mathbf{X}}(u,v)\in\mathbb{R}^3`, false)}
+    expressed in the <b>camera-1 world frame</b> (no extrinsic chain needed at
+    inference). Plus a confidence channel.</p>
+    <p>The paper finds <b>depth → unproject</b> more accurate for clean clouds,
+    so this app uses depth + ${kx(String.raw`K,R,\mathbf{t}`, false)}:</p>
+    ${kx(String.raw`\mathbf{X}_w=R^{\!\top}\!\bigl(\hat{d}\,K^{-1}\![u,v,1]^{\!\top}-\mathbf{t}\bigr)`)}
+    <p>(<code>vggt/utils/geometry.py::unproject_depth_map_to_point_map</code>).
+    The point head still gets supervised — it stabilizes training. Source:
+    <code>vggt/heads/dpt_head.py</code>.</p>`,
   },
+
   track: {
-    t: "Track head",
-    h: `<p>A <b>CoTracker</b>-style module: given dense features + query
-    points it iteratively correlates and predicts 2D <b>tracks</b> across all
-    frames plus <b>visibility</b>. This powers the Point-tracking panel; query
-    points are expected on frame&nbsp;0, hence the reorder logic in
-    <code>vggt_runner.track</code>.</p>
-    <p><code>vggt/heads/track_head.py</code></p>`,
+    t: "Track head — CoTracker-style temporal refinement",
+    h: `<p>Inputs: dense features (built from aggregator tokens of the
+    target layers), the original images, ${kx(String.raw`\texttt{ps\_idx}`, false)},
+    and a query tensor ${kx(String.raw`\mathbf{Q}\in\mathbb{R}^{B\times Q\times 2}`, false)}
+    of query pixels in frame 0. (When the user picks frame ${kx(String.raw`k\!\neq\!0`, false)},
+    this app reorders the batch so ${kx(String.raw`k`, false)} is first and
+    re-runs the aggregator — see <code>vggt_runner.track</code>.)</p>
+    <p><b>1. Feature pyramids.</b> Build per-frame dense feature maps
+    ${kx(String.raw`\mathbf{F}_n`, false)} via DPT-like projections of the same
+    aggregator tokens used by depth (no separate backbone).</p>
+    <p><b>2. Correlation / cost volumes.</b> For each query
+    ${kx(String.raw`\mathbf{q}`, false)} encode its feature
+    ${kx(String.raw`\phi(\mathbf{q})`, false)} and compute, per frame
+    ${kx(String.raw`n`, false)}, a local cost volume around the current track
+    estimate ${kx(String.raw`\hat{\mathbf{p}}_n`, false)}:</p>
+    ${kx(String.raw`\mathbf{c}_n(\Delta)=\langle\phi(\mathbf{q}),\,\mathbf{F}_n[\hat{\mathbf{p}}_n+\Delta]\rangle`)}
+    <p><b>3. Iterative state updates</b> (CoTracker style, ${kx(String.raw`T\!=\!4`, false)} iters):
+    a small transformer treats each query as a temporal state across frames and
+    produces residuals on track and visibility logits:</p>
+    ${kx(String.raw`(\hat{\mathbf{p}}_n,\;\hat{v}_n)\;\leftarrow\;
+                    (\hat{\mathbf{p}}_n,\;\hat{v}_n)\;+\;\text{Update}(\mathbf{c}_n,\;\hat{\mathbf{p}}_n,\;\hat{v}_n)`)}
+    <p><b>Outputs.</b> Final tracks ${kx(String.raw`\hat{\mathbf{p}}\in\mathbb{R}^{N\times Q\times 2}`, false)}
+    and visibilities ${kx(String.raw`\hat{v}\in[0,1]^{N\times Q}`, false)} —
+    that's what the Point-tracking panel renders.</p>
+    <p>Source: <code>vggt/heads/track_head.py</code>.</p>`,
   },
+
   out: {
-    t: "Outputs",
-    h: `<p>Per view: extrinsics ${kx(String.raw`[R|t]`, false)} (world→cam),
-    intrinsics ${kx(String.raw`K`, false)}, dense depth + point map with
-    confidence, and tracks. All consistent in the camera-1 world frame, so
-    the cloud and frustums in the 3D view share one coordinate system.</p>`,
+    t: "Outputs in a single forward pass",
+    h: `<p>Per view, all consistent in the camera-1 world frame:</p>
+    <ul>
+      <li>${kx(String.raw`R\in SO(3),\;\mathbf{t}\in\mathbb{R}^3`, false)} extrinsics,
+          ${kx(String.raw`K\in\mathbb{R}^{3\times 3}`, false)} intrinsics.</li>
+      <li>Dense ${kx(String.raw`\hat{d}(u,v)`, false)} + ${kx(String.raw`\hat{\sigma}_d`, false)}.</li>
+      <li>Dense ${kx(String.raw`\hat{\mathbf{X}}(u,v)`, false)} + ${kx(String.raw`\hat{\sigma}_p`, false)}.</li>
+      <li>Tracks ${kx(String.raw`\hat{\mathbf{p}}`, false)} +
+          visibilities ${kx(String.raw`\hat{v}`, false)} (only when queries given).</li>
+    </ul>
+    <p>No iterative reconstruction, no bundle adjustment — one feed-forward.
+    The whole frustum-and-cloud picture you see in the 3D view shares this
+    single coordinate system, which is why the camera frustums and the points
+    line up without further alignment.</p>`,
   },
 };
 
@@ -185,7 +303,123 @@ function trainHtml() {
   recipe is summarized from the paper — nothing here is reproduced.</p>`;
 }
 
-// --- Attention tab ---------------------------------------------------------
+// --- Attention tab: step-by-step block anatomy -----------------------------
+function tokenLayoutSvg() {
+  const tokens = [
+    { l: "cam", c: "#ff5252" },
+    { l: "r0", c: "#34373d" }, { l: "r1", c: "#34373d" },
+    { l: "r2", c: "#34373d" }, { l: "r3", c: "#34373d" },
+  ];
+  for (let i = 0; i < 10; i++) tokens.push({ l: `p${i}`, c: "#1b5fff" });
+  tokens.push({ l: "…", c: "#1b5fff", faded: true });
+  const w = 36, gap = 2;
+  const cells = tokens.map((t, i) => `
+    <g transform="translate(${i * (w + gap)},0)">
+      <rect width="${w}" height="${w}" rx="4" fill="${t.c}" opacity="${t.faded ? 0.4 : 1}" />
+      <text x="${w / 2}" y="${w / 2 + 4}" text-anchor="middle" fill="#fff" font-size="11">${t.l}</text>
+    </g>`).join("");
+  return `<svg height="42" width="${tokens.length * (w + gap)}">${cells}</svg>`;
+}
+
+function attentionMaskSvg(kind, N = 3, S = 6) {
+  const cell = 9, NS = N * S, size = NS * cell;
+  let rects = "";
+  for (let r = 0; r < NS; r++) {
+    for (let c = 0; c < NS; c++) {
+      const fr = (r / S) | 0, fc = (c / S) | 0;
+      const on = kind === "global" || fr === fc;
+      rects += `<rect x="${c * cell}" y="${r * cell}" width="${cell - 1}" height="${cell - 1}" fill="${on ? "#2b6cff" : "#1c1e22"}"/>`;
+    }
+  }
+  // frame-boundary guide lines
+  let lines = "";
+  for (let i = 1; i < N; i++) {
+    const p = i * S * cell;
+    lines += `<line x1="${p}" y1="0" x2="${p}" y2="${size}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
+    lines += `<line x1="0" y1="${p}" x2="${size}" y2="${p}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
+  }
+  return `<svg width="${size}" height="${size}" style="background:#101114;border:1px solid #2a2c31;border-radius:4px">${rects}${lines}</svg>`;
+}
+
+function flowStep(title, body, color = "#2b6cff") {
+  return `
+  <div style="border-left:3px solid ${color};padding:6px 10px;margin:6px 0;background:#1c1e22;border-radius:4px">
+    <div style="font-weight:600;font-size:13px">${title}</div>
+    <div style="font-size:12px;color:#cfd2d6;margin-top:3px">${body}</div>
+  </div>`;
+}
+
+function renderAnatomy() {
+  const inn = `
+  <h3 style="margin:0 0 6px">Inside one Alternating-Attention block</h3>
+  <p>Each AA block takes a token grid
+     ${kx(String.raw`\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}`, false)}
+     and runs <b>two</b> pre-LN transformer sub-blocks back-to-back — frame-wise
+     first, then global. The only difference between them is the reshape
+     applied before the multi-head self-attention, which changes <i>which
+     tokens are allowed to attend to which</i>. Stack
+     ${kx(String.raw`L\!\approx\!24`, false)} of these to get the aggregator.</p>
+
+  <h4 style="margin:14px 0 4px">Per-image token layout (one row of length S)</h4>
+  <div style="overflow-x:auto">${tokenLayoutSvg()}</div>
+  <p class="hint">${kx(String.raw`\texttt{cam}`, false)} = camera token (read by
+   the camera head). ${kx(String.raw`\texttt{r0..r3}`, false)} = register tokens
+   (absorb high-norm artefacts; <code>ps_idx = 5</code> tells heads patches start
+   here). ${kx(String.raw`p_i`, false)} = patch tokens, row-major over
+   ${kx(String.raw`P=\tfrac{H}{14}\!\cdot\!\tfrac{W}{14}`, false)}.</p>
+
+  <h4 style="margin:18px 0 6px">Step-by-step flow</h4>
+  ${flowStep("Step 0 — Input",
+    `${kx(String.raw`\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}`, false)},
+     with ${kx(String.raw`C\!\approx\!1024`, false)} (ViT-L/14 width).`)}
+  ${flowStep("Step 1 — Frame-wise reshape",
+    `Flatten frames into the batch:
+     ${kx(String.raw`(B,N,S,C)\to(B\!\cdot\!N,\,S,\,C)`, false)}.
+     Each image is now an independent sequence of length ${kx(String.raw`S`, false)}.`)}
+  ${flowStep("Step 2 — MSA<sub>frame</sub> + residual",
+    `${kx(String.raw`\mathbf{X}\leftarrow\mathbf{X}+\mathrm{MSA}\!\big(\mathrm{LN}(\mathbf{X})\big)`, false)},
+     16 heads, mask = <b>block-diagonal</b> (see grid on the right). Cost
+     ${kx(String.raw`\mathcal{O}(N S^2 C)`, false)}.`)}
+  ${flowStep("Step 3 — MLP + residual",
+    `${kx(String.raw`\mathbf{X}\leftarrow\mathbf{X}+\mathrm{MLP}\!\big(\mathrm{LN}(\mathbf{X})\big)`, false)},
+     MLP ratio 4: ${kx(String.raw`C\!\to\!4C\!\to\!C`, false)} with GELU.
+     Then reshape back to ${kx(String.raw`(B,N,S,C)`, false)}.`)}
+  ${flowStep("Step 4 — Global reshape",
+    `Concatenate all images' tokens:
+     ${kx(String.raw`(B,N,S,C)\to(B,\,N\!\cdot\!S,\,C)`, false)}.
+     Tokens of different frames are now in one sequence.`, "#ffd400")}
+  ${flowStep("Step 5 — MSA<sub>global</sub> + residual",
+    `Same MSA but with <b>full</b> attention over ${kx(String.raw`NS`, false)}
+     positions. Cost ${kx(String.raw`\mathcal{O}((NS)^2 C)`, false)}.
+     <b>This is where view fusion happens.</b>`, "#ffd400")}
+  ${flowStep("Step 6 — MLP + residual, reshape back",
+    `As Step 3; output again ${kx(String.raw`(B,N,S,C)`, false)} — ready for the
+     next AA block.`, "#ffd400")}
+
+  <h4 style="margin:18px 0 6px">Attention-mask comparison (N=3, S=6 demo)</h4>
+  <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
+    <div>
+      <div style="font-size:12px;color:#9aa0a6;margin-bottom:4px">Frame-wise — block-diagonal</div>
+      ${attentionMaskSvg("frame")}
+      <div class="hint" style="margin-top:4px;max-width:170px">Each ${kx(String.raw`S\!\times\!S`, false)} block on the diagonal is one image; off-diagonal blocks are zero.</div>
+    </div>
+    <div>
+      <div style="font-size:12px;color:#9aa0a6;margin-bottom:4px">Global — full ${kx(String.raw`NS\!\times\!NS`, false)}</div>
+      ${attentionMaskSvg("global")}
+      <div class="hint" style="margin-top:4px;max-width:170px">Every token can attend to every other token of every frame.</div>
+    </div>
+  </div>
+
+  <p class="hint" style="margin-top:14px">The live picker below uses cosine
+   similarity of the chosen patch's residual-stream feature to every other
+   patch as a robust proxy for "what does this patch attend to?" — VGGT's fused
+   SDPA attention weights aren't exposed without patching the model. The
+   <b>cross-frame mixing</b> bars rise with depth: that rise <i>is</i> the
+   global sub-block of each AA block doing its job.</p>`;
+  $("attnAnatomy").innerHTML = inn;
+}
+
+// --- Attention tab: live similarity picker ---------------------------------
 let attnQuery = [0, 0]; // model-pixel coords on the picked frame
 let fetchTimer = null;
 
@@ -320,6 +554,7 @@ export async function initLearn(state, viewer) {
 
     $("geomMath").innerHTML = geomHtml();
     $("trainNotes").innerHTML = trainHtml();
+    renderAnatomy();
 
     mixChart = new Chart($("dataMix"), {
       type: "doughnut",
