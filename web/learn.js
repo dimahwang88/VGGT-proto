@@ -845,6 +845,43 @@ function renderAnatomy() {
         <td style="padding:3px 10px;border:1px solid #2a2c31">"pre-LN" = LN inside the residual branch</td></tr>
   </table>
 
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:10px 0;font-size:13px">
+    <b>${kx(String.raw`L`, false)} vs ${kx(String.raw`h`, false)} — two integers, different axes</b>
+    <table style="border-collapse:collapse;font-size:12px;margin:6px 0">
+      <tr>
+        <td style="padding:3px 12px 3px 0">${kx(String.raw`L`, false)}</td>
+        <td style="padding:3px 12px 3px 0">number of stacked AA <b>blocks</b> — <b>sequential</b>, the depth of the aggregator</td>
+        <td style="padding:3px 0;color:#9ad">≈ 24 in VGGT-1B</td>
+      </tr>
+      <tr>
+        <td style="padding:3px 12px 3px 0">${kx(String.raw`h`, false)}</td>
+        <td style="padding:3px 12px 3px 0">number of attention <b>heads</b> inside one MSA — <b>parallel</b>, the width within a layer</td>
+        <td style="padding:3px 0;color:#9ad">16 in ViT-L/14</td>
+      </tr>
+    </table>
+    <p style="margin:6px 0 0">
+      ${kx(String.raw`L`, false)} stacks blocks <b>vertically</b>: block&nbsp;1 →
+      block&nbsp;2 → … → block&nbsp;${kx(String.raw`L`, false)}. Each block
+      reads the residual stream, computes, writes back. ${kx(String.raw`h`, false)}
+      runs <b>horizontally</b>: inside a single MSA, ${kx(String.raw`h`, false)}
+      attentions on ${kx(String.raw`d_k=C/h`, false)}-wide slices execute in
+      parallel and are concatenated by ${kx(String.raw`W^O`, false)}.
+    </p>
+    <p style="margin:6px 0 0">
+      So a VGGT forward pass runs roughly
+      ${kx(String.raw`L\times 2\times h = 24\!\cdot\!2\!\cdot\!16 = 768`, false)}
+      head-attention computations (the
+      ${kx(String.raw`\times 2`, false)} is because each AA block has a
+      frame-wise <i>and</i> a global sub-block).
+    </p>
+    <p style="margin:6px 0 0;color:#cfd2d6">
+      <b>Mental model.</b> ${kx(String.raw`L`, false)} = <i>floors of a
+      building</i> (each floor transforms what comes in and passes it up).
+      ${kx(String.raw`h`, false)} = <i>workers on one floor</i> doing parallel
+      sub-tasks before handing one merged result to the next floor.
+    </p>
+  </div>
+
   <h4 style="margin:18px 0 6px">Refresher — LayerNorm (LN)</h4>
   <p>For a single token vector ${kx(String.raw`\mathbf{x}\in\mathbb{R}^{C}`, false)} (one of the
      ${kx(String.raw`B\!\cdot\!N\!\cdot\!S`, false)} tokens in the grid), LN computes
