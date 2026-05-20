@@ -451,6 +451,76 @@ function eqAttnSvg() {
   </svg>`;
 }
 
+// Concrete worked example: tiny score matrix → softmax → weights, with
+// the actual numbers shown in each cell + per-row sums on the right.
+function softmaxDemoSvg() {
+  const scores = [
+    [2.0, 1.5, 0.0, 0.5],
+    [0.5, 2.0, 1.0, 1.2],
+    [-1.0, 0.0, 2.5, 0.5],
+    [0.8, 0.5, 1.0, 1.5],
+  ];
+  const weights = scores.map((row) => {
+    const m = Math.max(...row);
+    const exps = row.map((v) => Math.exp(v - m));
+    const sum = exps.reduce((a, b) => a + b, 0);
+    return exps.map((e) => e / sum);
+  });
+  const cell = 44, n = scores.length;
+  const gridSvg = (x, y, mat, kind) => {
+    let s = "";
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        const v = mat[r][c];
+        let fill;
+        if (kind === "score") {
+          const t = Math.max(-1, Math.min(1, v / 3));
+          fill = t >= 0
+            ? `rgba(255,82,82,${0.12 + t * 0.55})`
+            : `rgba(43,108,255,${0.12 + -t * 0.55})`;
+        } else {
+          fill = `rgba(255,82,82,${0.10 + v * 0.70})`;
+        }
+        s += `<rect x="${x + c * cell}" y="${y + r * cell}" width="${cell}" height="${cell}" fill="${fill}" stroke="#2a2c31" stroke-width="0.5"/>`;
+        const txt = kind === "weight" ? v.toFixed(2) : v.toFixed(1);
+        s += `<text x="${x + c * cell + cell / 2}" y="${y + r * cell + cell / 2 + 4}" text-anchor="middle" fill="#fff" font-size="11" font-weight="500">${txt}</text>`;
+      }
+      if (kind === "weight") {
+        const rs = mat[r].reduce((a, b) => a + b, 0);
+        s += `<text x="${x + n * cell + 10}" y="${y + r * cell + cell / 2 + 4}" fill="#ffd400" font-size="11">Σ = ${rs.toFixed(2)}</text>`;
+      }
+    }
+    // column header (key index) and row header (query index)
+    for (let c = 0; c < n; c++) {
+      s += `<text x="${x + c * cell + cell / 2}" y="${y - 4}" text-anchor="middle" fill="#9aa0a6" font-size="10">k${c + 1}</text>`;
+    }
+    for (let r = 0; r < n; r++) {
+      s += `<text x="${x - 8}" y="${y + r * cell + cell / 2 + 4}" text-anchor="end" fill="#9aa0a6" font-size="10">q${r + 1}</text>`;
+    }
+    return s;
+  };
+  const sGridX = 50, sGridY = 50, gridW = n * cell;
+  const arrowX1 = sGridX + gridW + 15;
+  const wGridX = arrowX1 + 165;
+  const arrowMidX = (arrowX1 + wGridX - 15) / 2;
+  return `
+  <svg viewBox="0 0 ${wGridX + gridW + 110} 250" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px">
+    <defs>
+      <marker id="sd" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#ffd400"/>
+      </marker>
+    </defs>
+    <text x="${sGridX + gridW / 2}" y="${sGridY - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Aᵢ — raw scores (S = 4 demo)</text>
+    ${gridSvg(sGridX, sGridY, scores, "score")}
+    <line x1="${arrowX1}" y1="${sGridY + gridW / 2}" x2="${wGridX - 18}" y2="${sGridY + gridW / 2}"
+          stroke="#ffd400" stroke-width="1.5" marker-end="url(#sd)"/>
+    <text x="${arrowMidX}" y="${sGridY + gridW / 2 - 12}" text-anchor="middle" fill="#ffd400" font-size="11">softmax (row-wise)</text>
+    <text x="${arrowMidX}" y="${sGridY + gridW / 2 + 18}" text-anchor="middle" fill="#ffd400" font-size="10">wᵢⱼ = e^{Aᵢⱼ} / Σₖ e^{Aᵢₖ}</text>
+    <text x="${wGridX + gridW / 2}" y="${sGridY - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">wᵢ — weights (each row sums to 1)</text>
+    ${gridSvg(wGridX, sGridY, weights, "weight")}
+  </svg>`;
+}
+
 // Eq 3:  MSA(x) = [Attn_1 || … || Attn_h] · W^O
 function eqConcatSvg() {
   // 4 visible slices each (S × d_k) → concat into (S × C); then · W^O = out.
@@ -790,6 +860,69 @@ function renderAnatomy() {
      ${kx(String.raw`\mathrm{Attn}_i\in\mathbb{R}^{S\times d_k}`, false)}.
      The ${kx(String.raw`1/\sqrt{d_k}`, false)} factor keeps the softmax temperature
      well-behaved as ${kx(String.raw`d_k`, false)} grows.</p>
+
+  <h5 style="margin:14px 0 6px">Worked example — softmax on real numbers</h5>
+  <p>A toy ${kx(String.raw`S\!=\!4`, false)} run. The left grid is the raw
+     score matrix ${kx(String.raw`A_i`, false)} (red = positive, blue = negative
+     dot products). Apply softmax independently to <i>each row</i> — exponentiate
+     and divide by the row sum — and you get the right grid
+     ${kx(String.raw`w_i`, false)}, where every row sums to 1 (column on the right).</p>
+  ${softmaxDemoSvg()}
+  <p class="hint">Row 1: scores ${kx(String.raw`[2.0,\,1.5,\,0.0,\,0.5]`, false)} →
+     softmax ${kx(String.raw`[0.51,\,0.31,\,0.07,\,0.11]`, false)}.
+     Token 1's biggest score is on token 1 itself (51 %), then 2, then a long
+     tail. Row 3's score ${kx(String.raw`2.5`, false)} for token 3 dominates →
+     weight ${kx(String.raw`0.80`, false)} — softmax exaggerates the winner
+     because the exponential grows fast. That's why softmax is sometimes called
+     a "soft argmax".</p>
+
+  <h5 style="margin:18px 0 6px">Intuitions for each multiplication</h5>
+
+  <div style="background:#1c2434;border-left:3px solid #ff5252;padding:10px 14px;border-radius:4px;margin:8px 0;font-size:13px">
+    <b>${kx(String.raw`Q_i K_i^{\!\top}`, false)} — "how relevant is every token to me?"</b>
+    <p style="margin:6px 0 0">Each cell ${kx(String.raw`A_{rc}=\langle q_r,\,k_c\rangle`, false)}
+       is a <b>dot product</b> between the query of token ${kx(String.raw`r`, false)}
+       and the key of token ${kx(String.raw`c`, false)} — the standard measure of
+       similarity in this learned feature space. Row ${kx(String.raw`r`, false)}
+       of ${kx(String.raw`A_i`, false)} is token ${kx(String.raw`r`, false)}'s
+       <i>relevance row</i>: it tells you, for each candidate token in the sequence,
+       how strongly token ${kx(String.raw`r`, false)} wants to look at it.
+       A high score = "I should pay attention here".</p>
+  </div>
+
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:8px 0;font-size:13px">
+    <b>softmax — "turn raw votes into a distribution"</b>
+    <p style="margin:6px 0 0">Softmax normalizes each row so it sums to 1 and
+       <i>emphasizes the winner(s)</i>: exponentiation makes big scores big and
+       suppresses small/negative ones. After softmax, ${kx(String.raw`w_{rc}`, false)}
+       is a <b>probability</b>: "fraction of attention budget that token
+       ${kx(String.raw`r`, false)} spends on token ${kx(String.raw`c`, false)}".
+       Each token has a fixed budget of 1, allocated across the sequence.</p>
+  </div>
+
+  <div style="background:#1c2434;border-left:3px solid #2b6cff;padding:10px 14px;border-radius:4px;margin:8px 0;font-size:13px">
+    <b>${kx(String.raw`w_i V_i`, false)} — "pull in info from the tokens you chose"</b>
+    <p style="margin:6px 0 0">Row ${kx(String.raw`r`, false)} of the output is</p>
+    ${kx(String.raw`\mathrm{Attn}_i[r] \;=\; \sum_{c=1}^{S} w_{rc}\,v_c`)}
+    <p style="margin:6px 0 0">— a <b>weighted average of the value vectors</b>
+       with weights from token ${kx(String.raw`r`, false)}'s attention row.
+       If token 1 attended mostly to token 3 (${kx(String.raw`w_{13}\!=\!0.8`, false)}),
+       its output is roughly ${kx(String.raw`0.8\,v_3 + \text{small contributions from others}`, false)}.
+       Each query position effectively reaches out into the sequence and pulls
+       back a tailored mixture of values from whoever it found most relevant.</p>
+  </div>
+
+  <div style="background:#1c2434;border-left:3px solid #ff9100;padding:10px 14px;border-radius:4px;margin:8px 0;font-size:13px">
+    <b>final ${kx(String.raw`\mathrm{Attn}_i\in\mathbb{R}^{S\times d_k}`, false)} — "every token, now context-aware"</b>
+    <p style="margin:6px 0 0">After one attention pass, every token's new
+       representation contains information from <i>other</i> tokens it deemed
+       relevant. Stack ${kx(String.raw`L\!\approx\!24`, false)} AA blocks and the
+       effect compounds: by deep layers, a patch token has absorbed information
+       from many patches in its own frame (frame-wise sub-blocks) and from
+       patches in other frames (global sub-blocks). That progressive
+       accumulation is exactly what the live <b>cross-frame mixing</b> bars
+       further down visualize.</p>
+  </div>
 
   <p><b>3. Concatenate heads and project</b>:</p>
   ${kx(String.raw`\mathrm{MSA}(x)=\big[\mathrm{Attn}_1\;\Vert\;\dots\;\Vert\;\mathrm{Attn}_h\big]\,W^O`)}
