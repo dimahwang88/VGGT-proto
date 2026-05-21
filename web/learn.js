@@ -466,6 +466,102 @@ function attentionMaskSvg(kind, N = 3, S = 6) {
   return `<svg width="${W}" height="${H}" style="background:#101114;border:1px solid #2a2c31;border-radius:4px">${axes}${frameLbls}${rects}${lines}</svg>`;
 }
 
+// Inductive biases — architectural priors VGGT bakes in.
+function archBiasesHtml() {
+  const row = (bias, asserts, where) => `
+    <tr>
+      <td style="padding:4px 10px;border:1px solid #2a2c31"><b>${bias}</b></td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31">${asserts}</td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31">${where}</td>
+    </tr>`;
+  return `
+  <h3 style="margin:18px 0 6px">Inductive biases — what VGGT assumes before seeing any data</h3>
+  <p>An <b>inductive bias</b> is the set of built-in architectural assumptions
+     that bias which functions a model tends to learn — before seeing any
+     training data. The "shape of the prior" over hypotheses.</p>
+
+  <h5 style="margin:10px 0 4px">The spectrum</h5>
+  <table style="border-collapse:collapse;font-size:12px">
+    <tr style="background:#1c1e22">
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">architecture</th>
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">strength</th>
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">built-in assumptions</th>
+    </tr>
+    <tr><td style="padding:4px 10px;border:1px solid #2a2c31">MLP</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">~none</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">universal approximator; sees inputs as flat vector</td></tr>
+    <tr><td style="padding:4px 10px;border:1px solid #2a2c31">CNN</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">strong</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">locality (nearby pixels matter), translation equivariance, parameter sharing</td></tr>
+    <tr><td style="padding:4px 10px;border:1px solid #2a2c31">RNN</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">strong</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">sequential / temporal — state carries past in strict order</td></tr>
+    <tr><td style="padding:4px 10px;border:1px solid #2a2c31">Transformer (attention)</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">weak</td>
+        <td style="padding:4px 10px;border:1px solid #2a2c31">permutation-equivariant by default (until position embeddings); no locality; no translation equivariance</td></tr>
+  </table>
+
+  <p style="margin-top:8px"><b>Trade-off.</b> Strong inductive bias → great
+     for <i>small data</i> (the prior fills the gaps), low ceiling (can't
+     override the assumption). Weak inductive bias → bad for small data
+     (everything must be learned), high ceiling (can learn arbitrary patterns
+     at scale). Famous result: ViT needs ~JFT-300M-scale data to match CNNs
+     on ImageNet; below that, ResNets win. With enough data ViTs surpass them,
+     and even <i>recover</i> CNN-like locality patterns in their first heads
+     (Cordonnier et al. 2020) — the prior <i>emerges</i> rather than being
+     hard-coded.</p>
+
+  <h5 style="margin:14px 0 4px">Inductive biases that ARE in VGGT</h5>
+  <p>Even though attention is intrinsically bias-light, VGGT's authors bolt on
+     several <b>structural priors</b> — each one an explicit "we believe the
+     world works this way":</p>
+  <table style="border-collapse:collapse;font-size:12px;width:100%">
+    <tr style="background:#1c1e22">
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">bias</th>
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">what it asserts</th>
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">where in VGGT</th>
+    </tr>
+    ${row("Local pixel structure",
+          "Nearby pixels belong together; image has 2-D layout.",
+          "14×14 patch-embed conv; 2-D positional embeddings.")}
+    ${row("Transferred semantic features",
+          "Natural images have shared low-level / mid-level structure (textures, objects, surfaces).",
+          "DINOv2 init of patch embed and early aggregator layers — a <i>learned</i> bias bolted on by transfer.")}
+    ${row("Two-phase view reasoning",
+          "Per-image features first, then fuse across views — better than always-global attention.",
+          "Alternating frame ↔ global structure of every AA block.")}
+    ${row("Camera-1 as world frame",
+          "A canonical reference frame exists; pose is relative to it.",
+          "First camera token special-cased; gauge fix on camera 1.")}
+    ${row("Register slots",
+          "Some token capacity should be reserved as 'scratch space' for artefacts.",
+          "4 register tokens per image (DINOv2 with-registers variant).")}
+    ${row("Dense prediction from token grids",
+          "Per-pixel outputs share multi-scale spatial structure (FPN-like fusion helps).",
+          "DPT reassembly + RefineNet in depth and point heads.")}
+    ${row("Iterative pose refinement",
+          "Camera pose is best estimated by 4 refinement steps, not one shot.",
+          "T=4 unrolled passes inside the camera head.")}
+    ${row("Heteroscedastic noise",
+          "Pixel-wise prediction uncertainty varies across the image (textureless vs textured, occlusions).",
+          "Aleatoric Laplace loss heads outputting per-pixel σ.")}
+    ${row("Pinhole imaging",
+          "Cameras are pinholes; principal point at image centre; FOV → focal.",
+          "9-D pose encoding; <code>pose_encoding_to_extri_intri</code> decoder.")}
+  </table>
+
+  <p class="hint" style="margin-top:8px">
+     <b>Why this matters intuitively.</b> Without these priors, a generic
+     transformer could in principle learn 3D from images — but you'd need
+     orders of magnitude more data, slower convergence, and the model would
+     have to discover "alternating attention helps", "DPT-style multi-scale
+     fusion helps", "iterative pose refinement converges better" etc. from
+     scratch. These biases are how the authors inject 30+ years of multi-view
+     geometry research into the architecture, so the network doesn't re-derive
+     it from pixels.
+  </p>`;
+}
+
 // ----- Matrix-shape SVG helpers for the three MSA equations ----------------
 function mBox(x, y, w, h, fill, label, rowLbl, colLbl) {
   return `
@@ -1696,6 +1792,7 @@ export async function initLearn(state, viewer) {
     $("geomMath").innerHTML = geomHtml();
     $("trainNotes").innerHTML = trainHtml();
     $("archParams").innerHTML = paramBudgetHtml();
+    $("archBiases").innerHTML = archBiasesHtml();
     renderAnatomy();
 
     mixChart = new Chart($("dataMix"), {

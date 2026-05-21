@@ -293,6 +293,72 @@ for name, mod in m.named_children():
     print(f"  {name:&lt;14s} {n/1e6:7.1f} M")
 </pre>
 
+<h3>1.10 Inductive biases — what VGGT assumes before seeing any data</h3>
+<p>An <strong>inductive bias</strong> is the set of built-in architectural
+assumptions that bias which functions a model tends to learn — before seeing
+any training data. The "shape of the prior" over hypotheses.</p>
+
+<h4>The spectrum</h4>
+<table>
+  <tr><th>architecture</th><th>strength</th><th>built-in assumptions</th></tr>
+  <tr><td>MLP</td><td>~none</td><td>universal approximator; sees inputs as flat vector</td></tr>
+  <tr><td>CNN</td><td>strong</td><td>locality (nearby pixels matter), translation equivariance, parameter sharing</td></tr>
+  <tr><td>RNN</td><td>strong</td><td>sequential / temporal — state carries past in strict order</td></tr>
+  <tr><td>Transformer (attention)</td><td>weak</td><td>permutation-equivariant by default (until position embeddings); no locality; no translation equivariance</td></tr>
+</table>
+
+<p><strong>Trade-off.</strong> Strong inductive bias → great for <em>small
+data</em> (prior fills the gaps), low ceiling. Weak inductive bias → bad for
+small data, high ceiling. Famous result: ViT needs ~JFT-300M data to match
+CNNs on ImageNet; below that, ResNets win. With enough data ViTs surpass
+them, and even <em>recover</em> CNN-like locality patterns in their first
+heads (Cordonnier et al. 2020) — the prior <em>emerges</em> rather than being
+hard-coded.</p>
+
+<h4>Inductive biases that ARE in VGGT</h4>
+<p>Even though attention itself is bias-light, VGGT's authors bolt on several
+<strong>structural priors</strong> — each one an explicit "we believe the
+world works this way":</p>
+<table>
+  <tr><th>bias</th><th>what it asserts</th><th>where in VGGT</th></tr>
+  <tr><td><strong>Local pixel structure</strong></td>
+      <td>Nearby pixels belong together; image has 2-D layout.</td>
+      <td>14×14 patch-embed conv; 2-D positional embeddings.</td></tr>
+  <tr><td><strong>Transferred semantic features</strong></td>
+      <td>Natural images have shared low-level / mid-level structure (textures, objects, surfaces).</td>
+      <td>DINOv2 init of patch embed and early aggregator layers — a <em>learned</em> bias bolted on by transfer.</td></tr>
+  <tr><td><strong>Two-phase view reasoning</strong></td>
+      <td>Per-image features first, then fuse across views — better than always-global attention.</td>
+      <td>Alternating frame ↔ global structure of every AA block.</td></tr>
+  <tr><td><strong>Camera-1 as world frame</strong></td>
+      <td>A canonical reference frame exists; pose is relative to it.</td>
+      <td>First camera token special-cased; gauge fix on camera 1.</td></tr>
+  <tr><td><strong>Register slots</strong></td>
+      <td>Some token capacity should be reserved as "scratch space" for artefacts.</td>
+      <td>4 register tokens per image (DINOv2 with-registers variant).</td></tr>
+  <tr><td><strong>Dense prediction from token grids</strong></td>
+      <td>Per-pixel outputs share multi-scale spatial structure (FPN-like fusion helps).</td>
+      <td>DPT reassembly + RefineNet in depth and point heads.</td></tr>
+  <tr><td><strong>Iterative pose refinement</strong></td>
+      <td>Camera pose is best estimated by 4 refinement steps, not one shot.</td>
+      <td>T=4 unrolled passes inside the camera head.</td></tr>
+  <tr><td><strong>Heteroscedastic noise</strong></td>
+      <td>Pixel-wise prediction uncertainty varies across the image (textureless vs textured, occlusions).</td>
+      <td>Aleatoric Laplace loss heads outputting per-pixel $\sigma$.</td></tr>
+  <tr><td><strong>Pinhole imaging</strong></td>
+      <td>Cameras are pinholes; principal point at image centre; FOV → focal.</td>
+      <td>9-D pose encoding; <code>pose_encoding_to_extri_intri</code> decoder.</td></tr>
+</table>
+
+<p class="hint"><strong>Why this matters intuitively.</strong> Without these
+priors, a generic transformer could in principle learn 3D from images — but
+you'd need orders of magnitude more data, slower convergence, and the model
+would have to discover "alternating attention helps", "DPT-style multi-scale
+fusion helps", "iterative pose refinement converges better" etc. from
+scratch. These biases are how the authors inject 30+ years of multi-view
+geometry research into the architecture, so the network doesn't re-derive it
+from pixels.</p>
+
 
 <!-- =================================================================== -->
 <h2>2. Inside one Alternating-Attention block</h2>
