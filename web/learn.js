@@ -1573,6 +1573,63 @@ function renderAnatomy() {
      otherwise contaminate patch tokens. DINOv2's <b>with-registers</b> variant
      is what VGGT loads.</p>
 
+  <h4 style="margin:18px 0 6px">Why 4 register tokens? (the "junk drawer" of the transformer)</h4>
+  <p><b>The problem registers solve.</b> Train a standard ViT (no registers)
+     and a strange artefact emerges: a small number of patch tokens —
+     usually in <i>low-information</i> regions (sky, smooth walls, blurred
+     background) — develop unusually <b>high norms</b>. The model has
+     repurposed them as <b>global scratch space</b>: that's where it now
+     stores scene-level bookkeeping (statistics, normalizations, "this is an
+     outdoor image", …) because it has nowhere else to put it.</p>
+  <p>This hurts dense prediction badly. The patches that <i>should</i>
+     represent the sky no longer do — they've been hijacked for bookkeeping.
+     A depth head reading those patches gets garbage exactly where it most
+     needs to rely on a clean prior.</p>
+
+  <p><b>The fix.</b> Prepend a handful of <b>dummy tokens</b> that are not
+     derived from the image — just learned vectors. Now the model has a
+     dedicated scratchpad: it can write its global summaries to the registers
+     instead of hijacking real patches.</p>
+  <p>After training with registers:</p>
+  <ul>
+    <li><b>Patch tokens stay clean</b> — low-norm, faithful to their local
+        14×14 region.</li>
+    <li><b>Register tokens absorb the bookkeeping</b> — they're the
+        high-norm outliers now, but they don't represent any image content
+        so no harm done.</li>
+    <li><b>Attention maps become smooth</b> — the spotty hot-spots over sky
+        regions disappear.</li>
+    <li><b>Downstream dense prediction (depth, segmentation, point maps)
+        improves measurably</b>, especially in textureless regions.</li>
+  </ul>
+
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:8px 0;font-size:13px">
+    <b>Why specifically 4?</b>
+    <ul style="margin:6px 0 0">
+      <li><b>0 registers</b>: artefact appears, dense prediction suffers.</li>
+      <li><b>1 register</b>: helps but not enough — one slot isn't enough
+          scratch space.</li>
+      <li><b>4–8 registers</b>: artefact fully gone, downstream tasks improve.</li>
+      <li><b>More</b>: diminishing returns; just costs compute.</li>
+    </ul>
+    <p style="margin:6px 0 0">DINOv2 chose 4 as the sweet spot. VGGT inherits
+       this from the with-registers variant.</p>
+  </div>
+
+  <p><b>Why VGGT cares specifically.</b> Two of VGGT's four heads (DPT depth
+     and DPT point) read <i>patch tokens</i> directly to predict per-pixel
+     outputs. If patch tokens in textureless regions were corrupted with
+     global bookkeeping, depth there would be unreliable — exactly where you
+     most need a clean prior. Registers keep patch tokens trustworthy.</p>
+  <p>The heads then <b>ignore the register tokens entirely</b> — that's why
+     <code>ps_idx = 5</code> exists, to tell the heads "patches start
+     <i>after</i> the 5 special tokens". Registers are scratch space; they
+     don't carry information you'd want in the output.</p>
+
+  <p class="hint"><b>Mental model.</b> Registers are the <i>junk drawer</i>
+     of the transformer. Without one, junk piles up on your kitchen counter
+     (real patches). With one, the counter stays clean.</p>
+
   <h4 style="margin:18px 0 6px">Per-image token layout (one row of length S)</h4>
   <div style="overflow-x:auto">${tokenLayoutSvg()}</div>
   <p class="hint">${kx(String.raw`\texttt{cam}`, false)} = camera token (read by
