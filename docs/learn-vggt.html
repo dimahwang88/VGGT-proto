@@ -1,0 +1,1259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Learn VGGT — Architecture, Attention, Math &amp; Training</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { font: 14px/1.55 system-ui, sans-serif; background: #121316; color: #e6e6e6;
+         max-width: 900px; margin: 0 auto; padding: 28px 26px; }
+  h1, h2, h3, h4, h5 { color: #fff; }
+  h1 { font-size: 22px; margin: 0 0 10px; }
+  h2 { font-size: 18px; margin-top: 1.5em; border-bottom: 1px solid #2a2c31; padding-bottom: 4px;
+       page-break-before: always; break-before: page; }
+  h2:first-of-type { page-break-before: avoid; break-before: avoid; }
+  h3 { font-size: 16px; margin-top: 1.2em; }
+  h4 { font-size: 14px; margin-top: 1em; }
+  h5 { font-size: 13px; margin-top: 0.8em; color: #cfd2d6; }
+  p { margin: 0.5em 0; }
+  code { background: #1c1e22; color: #9ad; padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+  pre { background: #0d0e10; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px;
+        line-height: 1.45; color: #cfd2d6; }
+  table { border-collapse: collapse; margin: 8px 0; font-size: 0.92em; }
+  th, td { border: 1px solid #2a2c31; padding: 4px 10px; vertical-align: top; }
+  th { background: #1c1e22; text-align: left; }
+  .hint { color: #9aa0a6; font-size: 0.92em; }
+  .callout { background: #1c2434; border-left: 3px solid #2b6cff; padding: 10px 14px;
+             border-radius: 4px; margin: 8px 0; font-size: 0.95em; page-break-inside: avoid;
+             break-inside: avoid; }
+  .callout-y { border-left-color: #ffd400; }
+  .callout-r { border-left-color: #ff5252; }
+  .callout-o { border-left-color: #ff9100; }
+  .diag svg { display: block; margin: 8px auto; max-width: 100%; height: auto; }
+  .katex-display { margin: 8px 0 !important; font-size: 0.95em; }
+  ul, ol { padding-left: 20px; margin: 0.5em 0; }
+  li { margin: 3px 0; }
+  @page { margin: 14mm; }
+  /* Chain layout for DINOv2 visual */
+  .chain { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+           background: #0d0e10; border-radius: 6px; padding: 10px; font-size: 12px;
+           page-break-inside: avoid; }
+  .chain .step { text-align: center; }
+  .chain .box { width: 60px; height: 60px; border: 1px solid #2a2c31; border-radius: 4px;
+                margin: 0 auto 4px; }
+</style>
+</head>
+<body>
+
+<h1>Learn VGGT — Architecture, Attention, Math &amp; Training</h1>
+<p class="hint">Static teaching content extracted from the <em>Learn VGGT</em>
+panel of the VGGT-proto app. Excludes interactive widgets that need a running
+model (attention picker on your scene, geometry sliders driving the 3D viewer).
+Sources: <em>"VGGT: Visual Geometry Grounded Transformer", Wang et al.,
+CVPR 2025</em>; public <code>github.com/facebookresearch/vggt</code>; this
+app's <code>web/learn.js</code>.</p>
+
+<!-- =================================================================== -->
+<h2>1. Architecture overview</h2>
+
+<p>VGGT is a feed-forward transformer that takes 1–N RGB images and predicts
+cameras, dense depth + point maps, and 2D point tracks <strong>in a single
+forward pass</strong>. The pipeline:</p>
+<ol>
+  <li>Patch-tokenize each image with a DINOv2 ViT-L/14 backbone; prepend a
+      camera token and 4 register tokens per image.</li>
+  <li>Run the <strong>Alternating-Attention Aggregator</strong> — about 24
+      blocks alternating <em>frame-wise</em> ↔ <em>global</em> self-attention.</li>
+  <li>Pass aggregator tokens to four heads: camera, DPT depth, DPT point,
+      track.</li>
+  <li>Output extrinsics+intrinsics, dense depth + confidence, dense point map +
+      confidence, and 2D tracks + visibilities — all in the <strong>camera-1
+      world frame</strong>.</li>
+</ol>
+
+<h3>1.1 Input &amp; coordinate frame</h3>
+<p>VGGT ingests a batched stack of $N$ views as one tensor
+$\mathbf{I}\in\mathbb{R}^{B\times N\times 3\times H\times W}$ with $B=1$ and
+$H,W \equiv 0 \pmod{14}$. Preprocessing (in
+<code>vggt/utils/load_fn.py</code>) resizes, pads to a multiple of the patch
+size 14, and normalizes to DINOv2 mean/std. EXIF orientation is applied by the
+host app (see <code>backend/app.py</code>) — the model itself does not honor
+EXIF tags.</p>
+<p><strong>Coordinate frame.</strong> All extrinsics, depth, and point
+predictions are expressed in the world frame defined as
+<strong>camera 1 = identity</strong>. The first camera token is special-cased
+inside the aggregator (it anchors the global frame). That is also why the
+tracker's "fast path" only works when the reference frame is index 0 — the
+retained tokens already live in that frame.</p>
+
+<h3>1.2 Tokenization (DINOv2 ViT-L/14 + special tokens)</h3>
+<div class="callout callout-y">
+  <strong>Common misconception — DINOv2 is initialization, not a separate stage.</strong>
+  VGGT does <em>not</em> "run DINOv2 first, then run its own model". DINOv2's
+  pretrained weights are <strong>copied into</strong> VGGT's patch-embedding
+  conv (and the early aggregator transformer layers). VGGT then keeps training
+  those parameters with its own multi-task loss. At inference there is one
+  network — its patch-embed weights happen to <em>originate</em> from DINOv2.
+</div>
+<div class="callout callout-y">
+  <strong>"Pretrained" ≠ "frozen" ≠ "fixed" — three distinct ideas</strong>
+  <table>
+    <tr><th>term</th><th>meaning</th><th>applies to VGGT's patch embed?</th></tr>
+    <tr><td>pretrained</td>
+        <td>initialized from weights learned on a previous task (here: DINOv2's self-supervised objective)</td>
+        <td>✓ yes</td></tr>
+    <tr><td>frozen</td>
+        <td>weights don't update during the current task's training (no gradient flow)</td>
+        <td>✗ no — VGGT fine-tunes end-to-end</td></tr>
+    <tr><td>fixed</td>
+        <td>doesn't change at all, ever</td>
+        <td>✗ no (except trivially at inference, like every weight)</td></tr>
+  </table>
+  <p>So the patch-embedding conv is <strong>a learnable transformation,
+  pretrained on DINOv2, then fine-tuned end-to-end with VGGT's multi-task
+  loss</strong>. At inference of course all weights are static — but that's
+  true of every parameter, not something special about the patch embed.</p>
+  <p class="hint">Aside: some recipes <em>do</em> freeze the backbone — called
+  "linear probing" or "partial freezing". VGGT's paper doesn't suggest that;
+  standard interpretation is full end-to-end fine-tuning.</p>
+</div>
+<p><strong>1. Patch embedding.</strong> A single conv strides over the image:
+$$\text{PatchEmbed}:\ \text{Conv2d}(3\to C,\ k=14,\ s=14),\quad C\approx 1024$$
+so an image $(3, H, W)$ becomes $P = (H/14)(W/14)$ <strong>patch tokens</strong>
+of dim $C$. Weights are initialized from <strong>DINOv2 ViT-L/14</strong>
+(self-supervised, "registers" variant). The image alone therefore produces $P$
+tokens — <strong>not the full $S$</strong>; the next step prepends 5 more.</p>
+<p><strong>2. Special tokens (per image).</strong> The aggregator prepends:</p>
+<ul>
+  <li>1× <strong>camera token</strong> — later read by the camera head.</li>
+  <li>4× <strong>register tokens</strong> — absorb high-norm artefacts
+      (Darcet et al. 2023); they exist so patch tokens stay clean.</li>
+</ul>
+<p>Total length per image: $S = 1_{\text{cam}} + 4_{\text{reg}} + P$. The
+aggregator returns the patch start index $\texttt{ps\_idx} = 5$ so heads know
+where patch tokens begin. The batched layout used internally is
+$$\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}.$$</p>
+<p><strong>3. Positional info.</strong> 2-D sinusoidal / DINOv2 positional
+embeddings are added to patch tokens; the camera and register tokens get their
+own learned positional embeddings.</p>
+
+<h3>1.3 Alternating-Attention Aggregator (the engine)</h3>
+<div class="callout callout-y">
+  <strong>Common misconception — each AA block has TWO sub-blocks, not one.</strong>
+  A standard transformer block has one (MSA + MLP). A <strong>VGGT AA block</strong>
+  has <strong>two such sub-blocks back-to-back</strong>: a frame-wise (MSA + MLP) and a
+  global (MSA + MLP). So $L\approx 24$ AA blocks contain <strong>48 MSAs and 48 MLPs
+  total</strong>. "Alternating" refers to this within-block alternation
+  (frame ↔ global), not to alternation across the $L$ blocks.
+</div>
+<p>The pre-LN transformer block recipe:
+$$\begin{aligned}
+   \mathbf{x} &\leftarrow \mathbf{x} + \mathrm{MSA}(\mathrm{LN}(\mathbf{x}))\\
+   \mathbf{x} &\leftarrow \mathbf{x} + \mathrm{MLP}(\mathrm{LN}(\mathbf{x}))
+   \end{aligned}$$
+with
+$\mathrm{MSA}(x)=\bigoplus_{h=1}^{H}\mathrm{Attn}(xW^Q_h, xW^K_h, xW^V_h)\,W^O$
+and $\mathrm{MLP}(x)=W_2\,\mathrm{GELU}(W_1 x)$ (MLP ratio 4).</p>
+<p><strong>The VGGT twist.</strong> Each aggregator block contains
+<em>two</em> such sub-blocks back-to-back; the only difference is which tokens
+are allowed to attend to which. Given input
+$\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}$:</p>
+<pre>
+def aa_block(X):                          // shape (B,N,S,C)
+    # --- frame-wise sub-block ---
+    Xf = X.reshape(B*N, S, C)              // each image isolated
+    Xf = Xf + MSA_frame(LN(Xf))            // mask = block-diagonal
+    Xf = Xf + MLP_frame(LN(Xf))
+    X  = Xf.reshape(B, N, S, C)
+    # --- global sub-block ---
+    Xg = X.reshape(B, N*S, C)              // all tokens, all images
+    Xg = Xg + MSA_global(LN(Xg))           // full attention
+    Xg = Xg + MLP_global(LN(Xg))
+    return Xg.reshape(B, N, S, C)
+</pre>
+<p><strong>Costs.</strong> Frame-wise $\mathcal{O}(N\cdot S^2\cdot C)$; global
+$\mathcal{O}((NS)^2\cdot C)$. Alternating avoids paying the global cost twice
+as often as needed while still fusing views every block.</p>
+<p><strong>Stack.</strong> The public 1B checkpoint uses $L\approx 24$ AA
+blocks at ViT-L/14 dimensions $C=1024$, $h=16$ heads, MLP ratio 4 — all
+initialized from DINOv2.</p>
+
+<h3>1.4 Camera head — iterative pose regression</h3>
+<p>Reads only the $N$ camera tokens (one per image) at
+<code>ps_idx − 5</code>: $\mathbf{c}\in\mathbb{R}^{B\times N\times C}$.</p>
+<p><strong>1. Cross-view trunk.</strong> A small transformer attends across the
+$N$ camera tokens, so cameras "talk to each other" and the predicted poses
+become mutually consistent (no per-image picking — the trunk enforces a joint
+solution).</p>
+<p><strong>2. Iterative refinement.</strong> The trunk runs $T=4$ times, each
+pass predicting a residual update $\Delta\boldsymbol{\theta}_t$ on top of the
+previous estimate:
+$$\boldsymbol{\theta}_t = \boldsymbol{\theta}_{t-1} + \Delta\boldsymbol{\theta}_t,\quad
+   \boldsymbol{\theta}\in\mathbb{R}^{9}=[\,\mathbf{t}\,|\,\mathbf{q}\,|\,\text{FOV}_x,\text{FOV}_y\,].$$
+Camera 1 is gauge-fixed to identity (its prediction is overwritten).</p>
+<p><strong>3. Decoding to $(R,\mathbf{t},K)$.</strong> The quaternion is
+normalized then expanded; intrinsics use principal point $(W/2,H/2)$ and
+$f_x = (W/2)/\tan(\text{FOV}_x/2)$. Source:
+<code>vggt/utils/pose_enc.py::pose_encoding_to_extri_intri</code>.</p>
+
+<h3>1.5 DPT depth head — token reassembly</h3>
+<p>Take patch tokens from several aggregator layers; project, reshape
+$(P, C)\to(C', H/14, W/14)$, and use up/down convs to build a multi-scale
+feature pyramid at strides $s_\ell \in \{4, 8, 16, 32\}$. A RefineNet fusion
+combines them coarse→fine into a $(C_o, H, W)$ map, projected to two channels:
+$$\hat{d}(u,v)\in\mathbb{R}_{>0},\qquad \hat{\sigma}(u,v)\in\mathbb{R}_{>0}.$$</p>
+<p><strong>Aleatoric confidence.</strong> $\hat{\sigma}$ is the Laplacian
+scale used at training: pixels VGGT is uncertain about (textureless regions,
+occlusions) are down-weighted by
+$\mathcal{L}=|\hat{d}-d|\cdot e^{-\hat{\sigma}}+\alpha\hat{\sigma}$. At
+inference the host app uses $\hat{\sigma}$ as a confidence floor when building
+the displayed point cloud.</p>
+
+<h3>1.6 DPT point head</h3>
+<p>Identical DPT decoder structure but with a 3-channel output
+$\hat{\mathbf{X}}(u,v)\in\mathbb{R}^{3}$ expressed directly in the camera-1
+world frame, plus a confidence channel. The paper finds depth → unprojection
+more accurate for clean point clouds, so this app uses:
+$$\mathbf{X}_w = R^{\top}\!\bigl(\hat{d}\,K^{-1}\![u,v,1]^{\top}-\mathbf{t}\bigr)$$
+(via <code>vggt/utils/geometry.py::unproject_depth_map_to_point_map</code>).
+The point head is still supervised — it stabilizes training.</p>
+
+<h3>1.7 Track head — CoTracker-style temporal refinement</h3>
+<p>Inputs: dense features built from aggregator tokens, the original images,
+$\texttt{ps\_idx}$, and a query tensor
+$\mathbf{Q}\in\mathbb{R}^{B\times Q\times 2}$ of query pixels in frame 0. The
+algorithm:</p>
+<ol>
+  <li><strong>Feature pyramids</strong> — per-frame dense feature maps
+      $\mathbf{F}_n$ via DPT-like projections of aggregator tokens.</li>
+  <li><strong>Cost volumes</strong> — for each query
+      $\mathbf{q}$ encode its feature $\phi(\mathbf{q})$, then per frame
+      compute a local correlation around the current track estimate
+      $\hat{\mathbf{p}}_n$:
+      $\mathbf{c}_n(\Delta)=\langle\phi(\mathbf{q}),\mathbf{F}_n[\hat{\mathbf{p}}_n+\Delta]\rangle.$</li>
+  <li><strong>Iterative state updates</strong> ($T=4$ iters): a small
+      transformer treats each query as a temporal state across frames and
+      produces residuals on track and visibility logits.</li>
+</ol>
+<p>Outputs: final tracks $\hat{\mathbf{p}}\in\mathbb{R}^{N\times Q\times 2}$
+and visibilities $\hat{v}\in[0,1]^{N\times Q}$.</p>
+
+<h3>1.8 Outputs in a single forward pass</h3>
+<p>Per view, all in the camera-1 world frame:</p>
+<ul>
+  <li>$R\in SO(3),\ \mathbf{t}\in\mathbb{R}^{3}$ extrinsics; $K\in\mathbb{R}^{3\times 3}$ intrinsics.</li>
+  <li>Dense $\hat{d}(u,v)$ + $\hat{\sigma}_d$.</li>
+  <li>Dense $\hat{\mathbf{X}}(u,v)$ + $\hat{\sigma}_p$.</li>
+  <li>Tracks $\hat{\mathbf{p}}$ + visibilities $\hat{v}$ (when queries given).</li>
+</ul>
+<p>No iterative reconstruction, no bundle adjustment — one feed-forward pass
+produces a consistent scene.</p>
+
+<h3>1.9 Parameter budget — where ~1B trainable params come from</h3>
+<p>Approximate breakdown for the public VGGT-1B checkpoint. <strong>All
+parameters are trainable</strong> end-to-end during VGGT training — the
+"Init source" column tells you only <em>where the initial values came from</em>.
+Exact numbers depend on checkpoint configuration; verify with the snippet
+below.</p>
+<table>
+  <tr><th>Component</th><th>~Params</th><th>Init source</th><th>From DINOv2?</th></tr>
+  <tr><td>Patch embedding conv (Conv2d 3→C, k=s=14)</td><td>~0.6 M</td><td>DINOv2 ViT-L/14</td><td>✓</td></tr>
+  <tr><td>Per-patch positional embeddings</td><td>~1.4 M</td><td>DINOv2</td><td>✓</td></tr>
+  <tr><td>Camera token (1 learnable vector per image)</td><td>~1 K</td><td>random — VGGT-specific</td><td>—</td></tr>
+  <tr><td>Register tokens (4 learnable vectors per image)</td><td>~4 K</td><td>DINOv2 with-registers variant</td><td>✓</td></tr>
+  <tr><td>Aggregator — <strong>frame-wise</strong> sub-blocks (24 × ViT-L block: LN, MSA(4C²), MLP(8C²))</td><td>~302 M</td><td>DINOv2 ViT-L/14 transformer blocks</td><td>✓</td></tr>
+  <tr><td>Aggregator — <strong>global</strong> sub-blocks (24 × same structure, new for multi-view)</td><td>~302 M</td><td>random — VGGT-specific</td><td>—</td></tr>
+  <tr><td>Camera head (cross-view trunk + 9-D regressor, T=4 unrolled passes)</td><td>~10–30 M</td><td>random — VGGT-specific</td><td>—</td></tr>
+  <tr><td>DPT depth head (reassemble + RefineNet fusion)</td><td>~80–120 M</td><td>random — VGGT-specific</td><td>—</td></tr>
+  <tr><td>DPT point head (same DPT structure)</td><td>~80–120 M</td><td>random — VGGT-specific</td><td>—</td></tr>
+  <tr><td>Track head (CoTracker-style iterative)</td><td>~50–100 M</td><td>random — VGGT-specific</td><td>—</td></tr>
+  <tr><td>Final LayerNorms, biases, misc.</td><td>~0.1 M</td><td>various</td><td>—</td></tr>
+  <tr><th>Total (VGGT-1B)</th><th>≈ 1.0 B</th><th>≈ 304 M DINOv2 + ≈ 700 M random</th><th></th></tr>
+</table>
+<p class="hint">Roughly <strong>30% of VGGT's params come from DINOv2</strong> —
+the patch embedding, positional embeddings, register tokens, and the 24
+frame-wise transformer sub-blocks of the aggregator. The remaining
+<strong>~70% are random-initialized VGGT-original</strong>: the global
+sub-blocks (new for multi-view fusion) and the four heads. All of it then
+trains end-to-end.</p>
+<h4>Verify the real numbers on the pod</h4>
+<pre>
+from backend.vggt_runner import get_model
+m = get_model()
+
+total     = sum(p.numel() for p in m.parameters())
+trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
+print(f"Total: {total/1e6:.1f} M   Trainable: {trainable/1e6:.1f} M")
+
+# Per-top-level-module breakdown
+for name, mod in m.named_children():
+    n = sum(p.numel() for p in mod.parameters())
+    print(f"  {name:&lt;14s} {n/1e6:7.1f} M")
+</pre>
+
+
+<!-- =================================================================== -->
+<h2>2. Inside one Alternating-Attention block</h2>
+
+<p>Each AA block takes a token grid
+$\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}$
+and runs two pre-LN transformer sub-blocks back-to-back — frame-wise first,
+then global. The only difference between them is the reshape applied before
+multi-head self-attention.</p>
+
+<h3>2.1 Symbol legend</h3>
+<table>
+  <tr><th>symbol</th><th>meaning</th><th>typical value</th></tr>
+  <tr><td>$B$</td><td>batch — scenes per forward pass</td><td>1 in this app</td></tr>
+  <tr><td>$N$</td><td>number of views / images</td><td>≈ 1–50</td></tr>
+  <tr><td>$S$</td><td>tokens per image: $1_{\text{cam}}+4_{\text{reg}}+P$, with $P=(H/14)(W/14)$</td><td>e.g. 5 + 1369 = 1374 at 518×518</td></tr>
+  <tr><td>$C$</td><td>hidden dim — width of every token vector</td><td>1024 (ViT-L/14)</td></tr>
+  <tr><td>MSA</td><td>Multi-head Self-Attention: $h$ parallel heads of $\mathrm{softmax}(QK^\top/\sqrt{d_k})V$, concatenated then linearly projected</td><td>$h=16$ heads, $d_k = C/h = 64$</td></tr>
+  <tr><td>MLP</td><td>Multi-Layer Perceptron (FFN): per-token 2-layer $W_2\,\mathrm{GELU}(W_1 x)$</td><td>MLP ratio 4: $C\!\to\!4C\!\to\!C$</td></tr>
+  <tr><td>LN</td><td>LayerNorm — normalizes each token to zero mean / unit variance, then learned $\gamma,\beta$</td><td>"pre-LN" = LN inside residual branch</td></tr>
+</table>
+
+<div class="callout callout-y">
+<strong>$L$ vs $h$ — two integers, different axes</strong>
+<table>
+  <tr><th>symbol</th><th>what it counts</th><th>axis</th><th>value</th></tr>
+  <tr><td>$L$</td><td>stacked AA blocks</td><td>sequential — depth</td><td>≈ 24 in VGGT-1B</td></tr>
+  <tr><td>$h$</td><td>attention heads inside one MSA</td><td>parallel — width within a layer</td><td>16 in ViT-L/14</td></tr>
+</table>
+<p>$L$ stacks blocks vertically: block 1 → block 2 → … → block $L$. $h$ runs
+horizontally: inside a single MSA, $h$ attentions on $d_k = C/h$-wide slices
+execute in parallel and are concatenated by $W^O$. A VGGT forward pass runs
+roughly $L\times 2\times h = 24\!\cdot\!2\!\cdot\!16 = 768$ head-attention
+computations (×2 because each AA block has both a frame-wise <em>and</em> a
+global sub-block).</p>
+<p>Mental model: $L$ = floors of a building; $h$ = workers on one floor.</p>
+</div>
+
+<h3>2.2 Refresher — LayerNorm (LN)</h3>
+<p>For a single token vector $\mathbf{x}\in\mathbb{R}^{C}$ (one of the
+$B\!\cdot\!N\!\cdot\!S$ tokens), LN computes per-token statistics across the
+channel axis:</p>
+$$\mu=\tfrac{1}{C}\sum_{i=1}^{C} x_i,\qquad
+   \sigma^2=\tfrac{1}{C}\sum_{i=1}^{C}(x_i-\mu)^2$$
+<p>then normalizes and applies learned per-channel affine
+$\gamma,\beta\in\mathbb{R}^{C}$:</p>
+$$\mathrm{LN}(\mathbf{x})_i=\gamma_i\cdot\frac{x_i-\mu}{\sqrt{\sigma^2+\varepsilon}}+\beta_i.$$
+<p>LN is applied <strong>independently per token</strong> — it never mixes
+information across tokens or batch. (Contrast with BatchNorm, which would
+couple tokens across scenes.) That's why the same LN works unchanged for both
+AA sub-blocks: the frame-wise reshape $(B\!\cdot\!N,S,C)$ and the global
+reshape $(B,N\!\cdot\!S,C)$ both leave the per-token $C$ axis intact.</p>
+
+<h4>Pre-LN vs post-LN — why VGGT uses pre-LN</h4>
+$$\underbrace{\mathbf{x}\leftarrow\mathbf{x}+\mathrm{MSA}\!\big(\mathrm{LN}(\mathbf{x})\big)}_{\textbf{pre-LN — VGGT}}
+   \quad\text{vs.}\quad
+   \underbrace{\mathbf{x}\leftarrow\mathrm{LN}\!\big(\mathbf{x}+\mathrm{MSA}(\mathbf{x})\big)}_{\text{post-LN — original Transformer}}$$
+<p>Pre-LN became standard because with deep stacks (24+ blocks) it gives
+better gradient flow and trains without learning-rate warmup
+(Xiong et al. 2020). The residual stream can accumulate features across all
+$L$ layers without LN squashing them every step — important for an aggregator
+that has to carry geometry information end-to-end.</p>
+
+<h3>2.3 Why the residual <code>+ x</code>?</h3>
+<p>Why <em>add</em> the sublayer output back to the input rather than
+<em>replace</em> it? Four reasons, ordered by impact. Collectively known as a
+<strong>residual / skip connection</strong> (ResNet, He et al. 2015; adopted
+by Transformer, Vaswani et al. 2017).</p>
+<div class="callout">
+<strong>1 — Gradient flow.</strong> Without a residual, stacking $L$ layers
+makes the back-prop gradient a long product $\prod_\ell f'_\ell(x_\ell)$ that
+vanishes exponentially with depth. With the residual the local derivative
+becomes $I + f'_\ell(x_\ell)$ — the $I$ term guarantees a clean gradient
+highway back to early layers. Essential for a 24-block stack.
+</div>
+<div class="callout callout-y">
+<strong>2 — Identity-friendly init.</strong> At initialization MSA/MLP weights
+are small/random, so $\mathrm{MSA}(\mathrm{LN}(x))$ is a tiny perturbation.
+The residual makes $x + \text{small} \approx x$: the stack starts as the
+identity function and gradually learns useful refinements.
+</div>
+<div class="callout callout-r">
+<strong>3 — Sublayers learn deltas, not replacements.</strong> Rearrange:
+$\mathrm{MSA}(\mathrm{LN}(x)) = x_{\text{new}} - x_{\text{old}}$.
+The sublayer's job is to predict "what should I add to refine the current
+representation?" — much easier than "what is the next representation from
+scratch?".
+</div>
+<div class="callout callout-o">
+<strong>4 — The residual stream — a communication bus.</strong> Each sublayer
+reads from it (via LN), computes something, and writes back by adding.
+Information accumulates rather than being overwritten. For VGGT this is what
+lets the aggregator carry geometric structure (position embeds, camera-token
+signal, depth cues) through all 24 layers.
+</div>
+<p class="hint">Net effect: the model behaves like a base signal $x$ plus a
+sum of learned corrections $\sum_\ell f_\ell(\mathrm{LN}(x_\ell))$.</p>
+
+<h3>2.4 One patch → one token (the 1-to-1 mapping)</h3>
+<p>The image is tiled by the patch-embed conv (kernel = stride = 14) into
+non-overlapping 14×14×3 tiles. Each tile is compressed by one learned linear
+projection to a single $C$-dim token, then a position embedding is added:</p>
+$$\underbrace{\text{patch}\in\mathbb{R}^{588}}_{14\times 14\times 3}
+   \xrightarrow{W_{\text{patch}}\in\mathbb{R}^{C\times 588}}
+   \text{token}\in\mathbb{R}^{C}
+   \xrightarrow{+\,\text{pos embed}}
+   \text{patch token}\in\mathbb{R}^{C}.$$
+<div class="diag" id="d-patchToken"></div>
+<p>Stacking all $P=(H/14)(W/14)$ patch tokens gives the patch part of the
+per-image sequence: a $(P, C)$ matrix. The aggregator then prepends
+<strong>5 extra tokens that don't come from any patch</strong> — 1 camera + 4
+register tokens (learned vectors); together they make the
+$S = 1+4+P$ per-image sequence.</p>
+<p class="hint">Two practical consequences: (i) the live attention picker's
+similarity heatmap is exactly $(H/14)\!\times\!(W/14)$ — one cell per patch
+token, not per pixel; (ii) $H, W$ must be multiples of 14, otherwise patches
+don't tile the image cleanly.</p>
+
+<h3>2.5 Why DINOv2 pretraining matters</h3>
+<p>$W_{\text{patch}}$ (and the early aggregator weights) are <strong>not
+learned from scratch</strong> — they are initialized from
+<strong>DINOv2 ViT-L/14</strong> (Oquab et al. 2023), a vision transformer
+pretrained self-supervised on ~142M images. The "registers" variant gives the
+4 register tokens for free.</p>
+
+<h4>DINOv2's pretraining in one paragraph</h4>
+<p>A student ViT and a teacher ViT (an exponential moving average of the
+student) both encode two random crops of the same image. The student is
+trained so its patch tokens and image-level [CLS] token match the teacher's —
+without any human labels. The student learns features invariant to crop,
+scale, and color jitter: patches that depict the same surface end up with
+similar feature vectors regardless of viewpoint.</p>
+
+<h4>What that buys VGGT on day-zero of training</h4>
+<ul>
+  <li><strong>Patch tokens already cluster by content.</strong> DINOv2
+      features out-of-the-box support unsupervised segmentation and retrieval.
+      So two patches across frames that depict the same physical surface
+      already have similar token vectors before any VGGT-specific training has
+      happened — a head-start for the aggregator's global sub-blocks.</li>
+  <li><strong>VGGT learns geometry on top of semantics, not pixels.</strong>
+      The aggregator's job becomes "given semantically-meaningful patch
+      tokens, fuse views and predict cameras + depth" rather than "do
+      everything end-to-end from RGB".</li>
+  <li><strong>Far less 3D-annotated data needed.</strong> DINOv2 absorbed the
+      visual world; VGGT only has to specialize that prior for 3D — which is
+      why a ~1B-param checkpoint trained on ~17 datasets can generalize to
+      in-the-wild scenes.</li>
+</ul>
+
+<h4>Visual chain: image → DINOv2 patches → VGGT tokens</h4>
+<div class="chain">
+  <div class="step"><div class="box" style="background:#1c2434"></div>raw image<br /><span class="hint">(3, H, W)</span></div>
+  <div class="hint">→ patch-embed conv<br />init from DINOv2</div>
+  <div class="step"><div class="box" style="background:repeating-linear-gradient(0deg,#1b5fff,#1b5fff 8px,#34373d 8px,#34373d 9px),repeating-linear-gradient(90deg,#1b5fff,#1b5fff 8px,#34373d 8px,#34373d 9px)"></div>P patch tokens<br /><span class="hint">∈ ℝ^C, semantic</span></div>
+  <div class="hint">+ cam + 4 reg<br />+ pos embed</div>
+  <div class="step"><div class="box" style="background:#1b5fff;opacity:0.7"></div>x<br /><span class="hint">(S, C) per image</span></div>
+</div>
+
+<h3>2.6 Per-image token layout (one row of length S)</h3>
+<div class="diag" id="d-tokenLayout"></div>
+<p class="hint"><code>cam</code> = camera token (read by camera head).
+<code>r0..r3</code> = register tokens (absorb high-norm artefacts;
+$\texttt{ps\_idx}=5$ tells heads patches start here). $p_i$ = patch tokens,
+row-major over $P$.</p>
+
+<h3>2.7 Step-by-step flow inside one AA block</h3>
+<ol>
+  <li><strong>Input.</strong> $\mathbf{X}\in\mathbb{R}^{B\times N\times S\times C}$ with $C\approx 1024$.</li>
+  <li><strong>Frame-wise reshape.</strong> $(B,N,S,C)\to(B\!\cdot\!N, S, C)$. Each image is now an independent length-$S$ sequence.</li>
+  <li><strong>$\mathrm{MSA}_{\text{frame}}$ + residual.</strong>
+      $\mathbf{X}\leftarrow\mathbf{X}+\mathrm{MSA}(\mathrm{LN}(\mathbf{X}))$;
+      16 heads, mask = block-diagonal. Cost $\mathcal{O}(NS^2C)$.</li>
+  <li><strong>MLP + residual.</strong>
+      $\mathbf{X}\leftarrow\mathbf{X}+\mathrm{MLP}(\mathrm{LN}(\mathbf{X}))$;
+      MLP ratio 4: $C \to 4C \to C$ with GELU. Reshape back to $(B,N,S,C)$.</li>
+  <li><strong>Global reshape.</strong> $(B,N,S,C)\to(B, N\!\cdot\!S, C)$.</li>
+  <li><strong>$\mathrm{MSA}_{\text{global}}$ + residual.</strong> Same MSA
+      with full attention over $NS$ positions. Cost $\mathcal{O}((NS)^2 C)$.
+      <strong>This is where view fusion happens.</strong></li>
+  <li><strong>MLP + residual; reshape back.</strong> Output again
+      $(B,N,S,C)$, ready for the next AA block.</li>
+</ol>
+
+<h3>2.8 Attention-mask comparison (N=3 frames, S=6 tokens/frame demo)</h3>
+<p>Each grid is the $NS\!\times\!NS$ table of "is this query token allowed to
+look at this key token?" — row = query (token doing the looking), column =
+key (token being looked at). Each cell is one entry of the score matrix
+$A = QK^\top$ before softmax. Blue = attention allowed (computed). Grey =
+blocked / mask 0.</p>
+<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
+  <div>
+    <div class="hint">Frame-wise sub-block — only same-frame pairs talk</div>
+    <div class="diag" id="d-maskFrame"></div>
+    <p class="hint" style="max-width:280px">Blue blocks lie on the diagonal:
+       a query in frame 2 can only attend to keys in frame 2. (Not an explicit
+       mask — the reshape $(B,N,S,C)\to(B\!\cdot\!N,S,C)$ puts each frame in
+       its own MSA call.)</p>
+  </div>
+  <div>
+    <div class="hint">Global sub-block — anyone can talk to anyone</div>
+    <div class="diag" id="d-maskGlobal"></div>
+    <p class="hint" style="max-width:280px">The entire $NS\!\times\!NS$ grid
+       is blue — a query in frame 2 can pull from keys in frame 1 or 3. This
+       is where view fusion actually happens.</p>
+  </div>
+</div>
+
+<h3>2.9 Refresher — Multi-head Self-Attention (MSA)</h3>
+<p>Three learned linear projections turn each input token into a query, key,
+and value. Queries attend to keys (softmax-normalized) to produce weights,
+which then aggregate values. Doing this in $h$ parallel heads (each on a
+$d_k = C/h = 64$-dim slice) lets the model attend to several different
+relations at once:</p>
+$$\begin{aligned}
+   Q&=xW^Q,\quad K=xW^K,\quad V=xW^V\\
+   \mathrm{Attn}_i(Q,K,V)&=\mathrm{softmax}\!\Big(\frac{Q_iK_i^{\top}}{\sqrt{d_k}}\Big)\,V_i\\
+   \mathrm{MSA}(x)&=\big[\mathrm{Attn}_1\,\Vert\,\dots\,\Vert\,\mathrm{Attn}_h\big]\,W^O
+\end{aligned}$$
+
+<h4>Eq 1 — projections</h4>
+<div class="diag" id="d-eqProj"></div>
+
+<h4>Eq 2 — per-head attention</h4>
+<div class="callout callout-y">
+  <strong>$C$ vs $d_k$ — easy to confuse</strong>
+  <table>
+    <tr><td>$C$</td><td>full hidden dim — model width</td><td>1024</td></tr>
+    <tr><td>$d_k$</td><td><strong>per-head</strong> dim — slice of $C$: $d_k = C/h$</td><td>$1024/16 = 64$</td></tr>
+  </table>
+  <p>Eq 1 (projection) and Eq 3 (concat + $W^O$) operate at <strong>full width
+  $C$</strong>. Eq 2 (per-head attention) operates at the narrower $d_k$ —
+  that's why $Q_i, K_i, V_i$ are drawn as thin bars: each head sees only 64 of
+  the 1024 channels. The score matrix $A_i\in\mathbb{R}^{S\times S}$ has
+  neither $C$ nor $d_k$ in its shape; $d_k$ survives only in the
+  $1/\sqrt{d_k}$ temperature scaling.</p>
+</div>
+
+<div class="callout">
+  <strong>Indexing: <code>i</code> = head; rows = tokens</strong>
+  <p>$Q_i$ is not "the query for token $i$" — $i$ is the head index. Each
+  $Q_i \in \mathbb{R}^{S \times d_k}$: rows are all $S$ tokens' queries
+  restricted to head $i$'s 64 channels. So the matmul $Q_i \cdot K_i^\top
+  = A_i$ produces an $S\times S$ matrix where:</p>
+  $$A_i[r,c] = \langle q_r,\,k_c\rangle$$
+  <p>i.e. the dot product between token $r$'s query and token $c$'s key.
+  Row $r$ of $A_i$ is token $r$'s "relevance row" — how much it wants to
+  attend to each of the $S$ tokens.</p>
+  <div class="diag" id="d-indexClarify"></div>
+</div>
+<div class="diag" id="d-eqAttn"></div>
+
+<h4>Worked example — softmax on real numbers</h4>
+<p>A toy $S=4$ run. The left grid is the raw score matrix $A_i$ (red =
+positive, blue = negative dot products). Apply softmax independently to
+<em>each row</em> — exponentiate and divide by the row sum — and you get the
+right grid $w_i$, where every row sums to 1.</p>
+<div class="diag" id="d-softmaxDemo"></div>
+<p class="hint">Row 1: scores $[2.0, 1.5, 0.0, 0.5]\to$ softmax
+$[0.51, 0.31, 0.07, 0.11]$. Row 3's score $2.5$ for token 3 dominates → weight
+$0.80$ — softmax exaggerates the winner because the exponential grows fast.
+That's why softmax is sometimes called a "soft argmax".</p>
+
+<h4>Intuitions for each multiplication</h4>
+<div class="callout callout-r">
+  <strong>$Q_i K_i^{\top}$ — "how relevant is every token to me?"</strong>
+  <p>Each cell $A_{rc} = \langle q_r, k_c\rangle$ is a dot product (similarity
+  in the learned feature space). Row $r$ is token $r$'s relevance row: for
+  each candidate token, how strongly token $r$ wants to look at it. High score
+  = "I should pay attention here".</p>
+</div>
+<div class="callout callout-y">
+  <strong>softmax — "turn raw votes into a distribution"</strong>
+  <p>Softmax normalizes each row to sum to 1 and emphasizes winners: exp makes
+  big scores big and suppresses small/negative. After softmax, $w_{rc}$ is a
+  probability — fraction of attention budget that token $r$ spends on token
+  $c$.</p>
+</div>
+<div class="callout">
+  <strong>$w_i V_i$ — "pull in info from the tokens you chose"</strong>
+  <p>Row $r$ of the output is a weighted average of value vectors:</p>
+  $$\mathrm{Attn}_i[r] = \sum_{c=1}^{S} w_{rc}\,v_c.$$
+  <p>If token 1 attended mostly to token 3 ($w_{13}=0.8$), its output is
+  roughly $0.8\,v_3 + \text{small contributions from others}$. Each query
+  position effectively reaches out into the sequence and pulls back a tailored
+  mixture of values from whoever it found most relevant.</p>
+</div>
+<div class="callout callout-o">
+  <strong>final $\mathrm{Attn}_i\in\mathbb{R}^{S\times d_k}$ — "every token, now context-aware"</strong>
+  <p>After one attention pass every token contains information from other
+  tokens it deemed relevant. Stack $L\approx 24$ AA blocks and the effect
+  compounds: by deep layers, a patch token has absorbed information from many
+  patches in its own frame (frame-wise) and from patches in other frames
+  (global).</p>
+</div>
+
+<h4>Worked example — how the input tensor changes after MSA</h4>
+<p>Apply the row-stochastic weights from the softmax example to a tiny input
+tensor $x$ with $S=4$ tokens and a 4-dim feature axis. For clarity we set
+$V_i = x$.</p>
+<div class="diag" id="d-attnEffect"></div>
+<p class="hint">Token 0's original features $[1.0, 0.0, 1.0, 0.0]$ — nothing
+in dim 1. After the attention sub-block writes its contribution back into the
+residual, dim 1 of token 0 is $0.38$, from token 1 (which had $1.0$ in dim 1
+and weight $w_{01}=0.31$). That's context-awareness made concrete: tokens
+pick up features from other tokens they attended to.</p>
+
+<h4>Eq 3 — concat heads + $W^O$</h4>
+$$\mathrm{MSA}(x)=\big[\mathrm{Attn}_1\,\Vert\,\dots\,\Vert\,\mathrm{Attn}_h\big]\,W^O$$
+<div class="diag" id="d-eqConcat"></div>
+<p>$W^Q,W^K,W^V,W^O\in\mathbb{R}^{C\times C}$ are the four learned linear
+layers of MSA. $W^O$ is the <strong>output projection</strong>: after the $h$
+heads each produce a $(S, d_k)$ slice, they're concatenated on the channel
+axis to $(S, C)$ and multiplied by $W^O$. Without it the heads would never
+mix — each would only write to its own $d_k$ contiguous channels — so $W^O$
+blends them into a single coherent vector before it gets added back into the
+residual stream.</p>
+
+<h4>Why a separate $W^V$? Why not just $w\cdot x$?</h4>
+<p>Three reasons VGGT (and every transformer) uses a value projection:</p>
+<div class="callout">
+  <strong>1 — Decoupling routing from payload.</strong>
+  $Q, K$ answer "who's relevant to me?"; $V$ answers "what should I deliver?".
+  Tying them to a shared $x$ forces two unrelated roles onto the same weights.
+  A separate $W^V$ lets "what info do I provide?" specialize independently
+  from "what makes me look relevant?".
+</div>
+<div class="callout callout-y">
+  <strong>2 — Per-head specialization.</strong> $W^V$ is sliced into $h$
+  heads, so each head's $V_i$ can extract a different aspect of $x$: one head
+  might pull color, another edges, another depth cues. Without it every head
+  would deliver the identical payload (raw $x$).
+</div>
+<div class="callout callout-r">
+  <strong>3 — Without $W^V$ attention is linear in $x$.</strong> Output would
+  be a linear combination of input tokens. Stacking many such layers can only
+  produce more linear combinations. Together with the MLP non-linearity, the
+  learned $W^V$ gives the network the expressivity to learn arbitrary
+  nonlinear features of arbitrary subsets of tokens.
+</div>
+
+<h4>How $W^Q, W^K, W^V$ actually get trained</h4>
+<p>Same recipe as every other weight: <strong>random init → forward pass →
+loss → backprop → SGD step</strong>. Toy thought experiment: suppose the task
+says "for each patch, predict the average depth of patches with similar
+color." Gradient descent will end up discovering that:</p>
+<ul>
+  <li>$W^Q$ projects $x$ so $q_r$ encodes "what color am I asking about?"</li>
+  <li>$W^K$ projects $x$ so $k_c$ encodes "what color do I have?" — making
+      $q_r\cdot k_c$ large when colors match.</li>
+  <li>$W^V$ projects $x$ so $v_c$ encodes token $c$'s depth — the payload to
+      retrieve.</li>
+</ul>
+<p>Nobody hand-codes any of this. The optimizer just nudges every entry of
+every $W$ in whichever direction reduces loss; specialized patterns emerge
+after millions of steps. Mech-interp work has named some — "induction heads",
+"previous-token heads". In VGGT, heads end up doing cross-view feature
+matching for geometry.</p>
+<p class="hint">In code: PyTorch autograd computes
+$\partial \mathcal{L} / \partial W^Q$ (and same for $W^K, W^V$) by the chain
+rule. AdamW then updates
+$W \leftarrow W - \eta\,\hat{m}/(\sqrt{\hat{v}}+\varepsilon)$.</p>
+
+<h3>2.10 Putting it together — full block flow</h3>
+<div class="diag" id="d-msaDiagram"></div>
+
+<h3>2.11 Refresher — MLP (FFN inside each block)</h3>
+<p>Applied <strong>independently to every token</strong> (no token mixing — that
+job belongs to MSA). It's a 2-layer feed-forward net with 4× channel expansion
+and a GELU non-linearity:</p>
+$$\mathrm{MLP}(x)=W_2\,\mathrm{GELU}(W_1 x),\qquad W_1\in\mathbb{R}^{4C\times C},\ W_2\in\mathbb{R}^{C\times 4C}.$$
+<div class="diag" id="d-mlpDiagram"></div>
+<p class="hint">Roughly two-thirds of a transformer block's parameters live
+in this expansion ($2\cdot C\cdot 4C = 8C^2$ for MLP vs $4C^2$ for $Q,K,V,W^O$
+combined). GELU empirically beats ReLU for transformers.</p>
+
+<h4>What is the MLP actually for? (intuition)</h4>
+<p>If MSA is the <strong>communication</strong> step ("look around, gather
+info"), the MLP is the <strong>processing / thinking</strong> step ("now do
+something with what you gathered").</p>
+<div class="callout">
+  <strong>1 — Per-token nonlinear refinement.</strong> Attention produced a
+  token whose value is a linear weighted sum of values from elsewhere. MLP
+  applies a non-linear transformation per token — it can detect "is the mixed
+  feature now a corner?", "is it a depth discontinuity?" — things that need
+  non-linear thresholds on combinations of features.
+</div>
+<div class="callout callout-y">
+  <strong>2 — Feature detectors / knowledge storage.</strong> The $4C=4096$
+  hidden units are independent feature detectors. Mech-interp research finds
+  that MLPs are where transformers store features and facts; attention is
+  where they route them. In VGGT terms: attention says "patch r and patch c
+  are the same surface"; the MLP then computes new geometry-aware features
+  from that paired signal.
+</div>
+<div class="callout callout-r">
+  <strong>3 — Required for depth to do anything.</strong> A stack of MSA-only
+  blocks would collapse to a single linear-plus-softmax function — no matter
+  how deep, you wouldn't gain expressivity. The per-token MLP non-linearity is
+  what makes the depth $L = 24$ useful.
+</div>
+<p class="hint"><strong>Block-level recipe</strong>: gather (MSA) → think
+(MLP) → pass to next block. After 24 of these, every patch has had 24 rounds
+of "look around, then think" — gathering context from across frames and
+refining it through 24 layers of non-linear feature construction.</p>
+
+
+<!-- =================================================================== -->
+<h2>3. Geometry math (with refreshers)</h2>
+
+<h3>3.1 Pinhole projection</h3>
+<p>A world point $\mathbf{X}_w$ maps to a pixel via extrinsics then
+intrinsics:</p>
+$$\mathbf{X}_c = R\,\mathbf{X}_w + \mathbf{t},\qquad
+   \begin{bmatrix}u\\v\\1\end{bmatrix} \sim K\,\mathbf{X}_c,\quad
+   K=\begin{bmatrix} f_x & 0 & c_x\\ 0 & f_y & c_y\\ 0 & 0 & 1\end{bmatrix}.$$
+<p>VGGT puts the principal point at the image center
+$(c_x, c_y) = (W/2, H/2)$ and derives focal from FOV:</p>
+$$f_x = \dfrac{W/2}{\tan(\text{FOV}_x/2)}.$$
+
+<h3>3.2 Rotation: quaternion → R</h3>
+<p>The pose encoding stores rotation as a unit quaternion
+$\mathbf{q} = (w, x, y, z)$. It expands to:</p>
+$$R=\begin{bmatrix}
+   1-2(y^2+z^2) & 2(xy-wz) & 2(xz+wy)\\
+   2(xy+wz) & 1-2(x^2+z^2) & 2(yz-wx)\\
+   2(xz-wy) & 2(yz+wx) & 1-2(x^2+y^2)
+\end{bmatrix}.$$
+
+<h3>3.3 Depth unprojection (what builds the cloud)</h3>
+<p>For pixel $(u, v)$ with predicted depth $d$, the world point is the inverse
+pipeline:</p>
+$$\mathbf{X}_w = R^{\top}\!\bigl(d\,K^{-1}[u, v, 1]^{\top} - \mathbf{t}\bigr).$$
+<p>This is exactly what
+<code>unproject_depth_map_to_point_map</code> computes. In the live app the
+geometry-math sliders let you change the FOV and depth interactively and watch
+the frustum + principal-ray update on the 3D view — that interactive part is
+omitted from this PDF.</p>
+
+
+<!-- =================================================================== -->
+<h2>4. Training (conceptual — code &amp; data mixture not publicly released)</h2>
+
+<h3>4.1 Multi-task loss</h3>
+<p>VGGT is trained end-to-end with a weighted sum over the heads:</p>
+$$\mathcal{L} = \mathcal{L}_{\text{cam}} + \mathcal{L}_{\text{depth}}
+                + \mathcal{L}_{\text{point}} + \lambda\,\mathcal{L}_{\text{track}}.$$
+
+<h4>Aleatoric (Laplace) confidence weighting — a refresher</h4>
+<p>The dense heads predict an uncertainty $\sigma$; the loss down-weights
+uncertain pixels and pays a small price for being uncertain (learned,
+per-pixel robustness):</p>
+$$\mathcal{L}_{\text{depth}} = |\hat{y} - y|\cdot e^{-\sigma} + \alpha\,\sigma.$$
+<p>Camera loss: Huber on the pose-encoding components
+$(\mathbf{t}, \mathbf{q}, \text{FOV})$. Track loss: L1 on tracks + BCE on
+visibility (CoTracker-style).</p>
+
+<h3>4.2 Recipe (from the paper)</h3>
+<ul>
+  <li>Backbone initialized from <strong>DINOv2</strong>.</li>
+  <li>Variable views per sample (≈1–24) and variable resolution — teaches
+      view-count generalization.</li>
+  <li>AdamW with cosine learning-rate schedule; large-scale (paper reports
+      ~64×A100 GPUs).</li>
+  <li>Ground truth = real + synthetic datasets with metric depth and known
+      camera poses.</li>
+</ul>
+
+<h3>4.3 Indicative dataset mixture</h3>
+<p>The paper's exact mix is not publicly released. An indicative composition
+from public information:</p>
+<table>
+  <tr><th>dataset</th><th>indicative share</th></tr>
+  <tr><td>Co3Dv2</td><td>~18%</td></tr>
+  <tr><td>BlendedMVS</td><td>~14%</td></tr>
+  <tr><td>MegaDepth</td><td>~12%</td></tr>
+  <tr><td>ScanNet++</td><td>~11%</td></tr>
+  <tr><td>ARKitScenes</td><td>~10%</td></tr>
+  <tr><td>Hypersim (synthetic)</td><td>~9%</td></tr>
+  <tr><td>Habitat / HM3D (synthetic)</td><td>~9%</td></tr>
+  <tr><td>TartanAir (synthetic)</td><td>~8%</td></tr>
+  <tr><td>WildRGB-D / others</td><td>~9%</td></tr>
+</table>
+<p class="hint">⚠ Training code and the exact data mixture are <strong>not
+publicly released</strong>. The shares above are an indicative composition,
+not an official breakdown. Nothing here is reproduced — it's a recipe summary
+from the paper.</p>
+
+
+<!-- =================================================================== -->
+<!-- SVG generators copied from web/learn.js (pure functions, no katex)   -->
+<!-- =================================================================== -->
+<script>
+function mBox(x, y, w, h, fill, label, rowLbl, colLbl) {
+  return `
+    <text x="${x + w / 2}" y="${y - 5}" text-anchor="middle" fill="#9aa0a6" font-size="10">${colLbl}</text>
+    <text x="${x - 6}" y="${y + h / 2 + 4}" text-anchor="end" fill="#9aa0a6" font-size="10">${rowLbl}</text>
+    <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" fill="${fill}" stroke="#2a2c31"/>
+    <text x="${x + w / 2}" y="${y + h / 2 + 5}" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">${label}</text>`;
+}
+const mSym = (x, y, s) =>
+  `<text x="${x}" y="${y}" text-anchor="middle" fill="#cfd2d6" font-size="22" font-weight="600">${s}</text>`;
+
+function tokenLayoutSvg() {
+  const tokens = [
+    { l: "cam", c: "#ff5252" },
+    { l: "r0", c: "#34373d" }, { l: "r1", c: "#34373d" },
+    { l: "r2", c: "#34373d" }, { l: "r3", c: "#34373d" },
+  ];
+  for (let i = 0; i < 10; i++) tokens.push({ l: `p${i}`, c: "#1b5fff" });
+  tokens.push({ l: "…", c: "#1b5fff", faded: true });
+  const w = 36, gap = 2;
+  const cells = tokens.map((t, i) => `
+    <g transform="translate(${i * (w + gap)},0)">
+      <rect width="${w}" height="${w}" rx="4" fill="${t.c}" opacity="${t.faded ? 0.4 : 1}" />
+      <text x="${w / 2}" y="${w / 2 + 4}" text-anchor="middle" fill="#fff" font-size="11">${t.l}</text>
+    </g>`).join("");
+  return `<svg height="42" width="${tokens.length * (w + gap)}">${cells}</svg>`;
+}
+
+function attentionMaskSvg(kind, N = 3, S = 6) {
+  const cell = 10, NS = N * S, size = NS * cell;
+  const padL = 60, padT = 32, padR = 8, padB = 22;
+  let rects = "";
+  for (let r = 0; r < NS; r++) {
+    for (let c = 0; c < NS; c++) {
+      const fr = (r / S) | 0, fc = (c / S) | 0;
+      const on = kind === "global" || fr === fc;
+      rects += `<rect x="${padL + c * cell}" y="${padT + r * cell}" width="${cell - 1}" height="${cell - 1}" fill="${on ? "#2b6cff" : "#1c1e22"}"/>`;
+    }
+  }
+  let lines = "";
+  for (let i = 1; i < N; i++) {
+    const p = i * S * cell;
+    lines += `<line x1="${padL + p}" y1="${padT}" x2="${padL + p}" y2="${padT + size}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
+    lines += `<line x1="${padL}" y1="${padT + p}" x2="${padL + size}" y2="${padT + p}" stroke="#9aa0a6" stroke-dasharray="3 3" stroke-width="0.6"/>`;
+  }
+  let frameLbls = "";
+  for (let i = 0; i < N; i++) {
+    const mid = padL + (i + 0.5) * S * cell;
+    frameLbls += `<text x="${mid}" y="${padT - 6}" text-anchor="middle" fill="#cfd2d6" font-size="10">frame ${i + 1}</text>`;
+    const midY = padT + (i + 0.5) * S * cell + 3;
+    frameLbls += `<text x="${padL - 6}" y="${midY}" text-anchor="end" fill="#cfd2d6" font-size="10">frame ${i + 1}</text>`;
+  }
+  const W = padL + size + padR, H = padT + size + padB;
+  const axes = `
+    <text x="${padL + size / 2}" y="${H - 6}" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">→ keys  (token being looked AT)</text>
+    <text x="14" y="${padT + size / 2}" text-anchor="middle" fill="#fff" font-size="11" font-weight="600" transform="rotate(-90 14 ${padT + size / 2})">queries  (token doing the looking) →</text>`;
+  return `<svg width="${W}" height="${H}" style="background:#101114;border:1px solid #2a2c31;border-radius:4px">${axes}${frameLbls}${rects}${lines}</svg>`;
+}
+
+function eqProjSvg() {
+  const xW = 130, xH = 30, wW = 130, wH = 130;
+  const xPos = 60, wPos = xPos + xW + 50, qPos = wPos + wW + 50;
+  const xY = 60 + (wH - xH) / 2;
+  const midY = xY + xH / 2 + 7;
+  return `
+  <svg viewBox="0 0 ${qPos + xW + 60} 230" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
+    ${mBox(xPos, xY, xW, xH, "#34373d", "x", "S", "C")}
+    ${mSym(xPos + xW + 25, midY, "·")}
+    ${mBox(wPos, 60, wW, wH, "#2b6cff", "Wᴽ", "C", "C")}
+    ${mSym(wPos + wW + 25, midY, "=")}
+    ${mBox(qPos, xY, xW, xH, "#ff5252", "Q", "S", "C")}
+    <text x="${(xPos + qPos + xW) / 2}" y="215" text-anchor="middle" fill="#9aa0a6" font-size="11">
+      same shape for K = xWᴷ and V = xWⱽ (different weights, identical structure)
+    </text>
+  </svg>`;
+}
+
+function indexClarifySvg() {
+  const cell = 40;
+  const qX = 110, qW = 2 * cell, qH = 3 * cell, qY = 50;
+  const kX = qX + qW + 70, kW = 3 * cell, kH = 2 * cell, kY = qY + cell / 2;
+  const aX = kX + kW + 80, aW = 3 * cell, aH = 3 * cell, aY = qY;
+  let s = "";
+  s += `<text x="${qX + qW / 2}" y="${qY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">Q  —  rows = S tokens, cols = dₖ</text>`;
+  for (let r = 0; r < 3; r++) {
+    s += `<text x="${qX - 6}" y="${qY + r * cell + cell / 2 + 4}" text-anchor="end" fill="#ff5252" font-size="11" font-weight="600">q${r + 1}</text>`;
+    for (let c = 0; c < 2; c++) {
+      s += `<rect x="${qX + c * cell}" y="${qY + r * cell}" width="${cell}" height="${cell}" fill="rgba(255,82,82,0.25)" stroke="#2a2c31" stroke-width="0.5"/>`;
+    }
+  }
+  s += `<text x="${qX + qW + 35}" y="${qY + qH / 2 + 7}" text-anchor="middle" fill="#cfd2d6" font-size="22">·</text>`;
+  s += `<text x="${kX + kW / 2}" y="${kY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">Kᵀ  —  cols = S tokens, rows = dₖ</text>`;
+  for (let r = 0; r < 2; r++) {
+    for (let c = 0; c < 3; c++) {
+      s += `<rect x="${kX + c * cell}" y="${kY + r * cell}" width="${cell}" height="${cell}" fill="rgba(76,175,80,0.25)" stroke="#2a2c31" stroke-width="0.5"/>`;
+    }
+  }
+  for (let c = 0; c < 3; c++) {
+    s += `<text x="${kX + c * cell + cell / 2}" y="${kY + kH + 16}" text-anchor="middle" fill="#4caf50" font-size="11" font-weight="600">k${c + 1}</text>`;
+  }
+  s += `<text x="${kX + kW + 35}" y="${qY + qH / 2 + 7}" text-anchor="middle" fill="#cfd2d6" font-size="22">=</text>`;
+  s += `<text x="${aX + aW / 2}" y="${aY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">A  —  ALL S² pairwise scores, one matmul</text>`;
+  const hr = 0, hc = 1;
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const hi = r === hr && c === hc;
+      const fill = hi ? "rgba(255,212,0,0.45)" : "#1c1e22";
+      const stroke = hi ? "#ffd400" : "#2a2c31";
+      s += `<rect x="${aX + c * cell}" y="${aY + r * cell}" width="${cell}" height="${cell}" fill="${fill}" stroke="${stroke}" stroke-width="${hi ? 1.4 : 0.5}"/>`;
+      s += `<text x="${aX + c * cell + cell / 2}" y="${aY + r * cell + cell / 2 + 4}" text-anchor="middle" fill="#fff" font-size="10">q${r + 1}·k${c + 1}</text>`;
+    }
+  }
+  const hiX = aX + (hc + 1) * cell, hiY = aY + hr * cell + cell / 2;
+  s += `<text x="${hiX + 12}" y="${hiY - 4}" fill="#ffd400" font-size="11" font-weight="600">A[1,2] = q₁·k₂</text>`;
+  s += `<text x="${hiX + 12}" y="${hiY + 12}" fill="#ffd400" font-size="10">token 1's query · token 2's key</text>`;
+  return `<svg viewBox="0 0 ${aX + aW + 260} 200" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px">${s}</svg>`;
+}
+
+function eqAttnSvg() {
+  const S = 50, dk = 18;
+  const sliceY = 22, sliceH = 18, sliceW = 160, hShown = 8, sliceI = 3;
+  const cellW = sliceW / hShown;
+  const r1y = 80;
+  const qX = 100, kX = qX + dk + 60, aX = kX + S + 60;
+  const indX = qX + dk / 2 - sliceW / 2;
+  const hiX = indX + sliceI * cellW;
+  let slices = "";
+  for (let i = 0; i < hShown; i++) {
+    const fill = i === sliceI ? "#ff5252" : "#23272f";
+    slices += `<rect x="${indX + i * cellW}" y="${sliceY}" width="${cellW - 0.7}" height="${sliceH}" fill="${fill}" stroke="#2a2c31" stroke-width="0.5"/>`;
+  }
+  const r2y = 190;
+  const wX = 100, vX = wX + S + 60, oX = vX + dk + 60;
+  const wHeatmap = Array.from({ length: 6 }, (_, i) =>
+    `<rect x="${wX}" y="${r2y + (i + 0.5) * (S / 7) - 1}" width="${S}" height="${(S / 8) | 0}" fill="#ffd400" opacity="${0.15 + 0.08 * i}"/>`
+  ).join("");
+  return `
+  <svg viewBox="0 0 ${oX + dk + 80} 290" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
+    <defs>
+      <marker id="ax" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#ffd400"/>
+      </marker>
+      <marker id="qs" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#ff5252"/>
+      </marker>
+    </defs>
+    <text x="${indX + sliceW / 2}" y="${sliceY - 6}" text-anchor="middle" fill="#9aa0a6" font-size="10">
+      full Q from Eq 1 (width C)  =  [ Q₁ | Q₂ | … | Qₕ ]   — column-slices of width dₖ
+    </text>
+    ${slices}
+    <line x1="${hiX + cellW / 2}" y1="${sliceY + sliceH + 2}" x2="${qX + dk / 2}" y2="${r1y - 4}" stroke="#ff5252" stroke-width="1.4" marker-end="url(#qs)"/>
+    <text x="${hiX + cellW + 4}" y="${(sliceY + sliceH + r1y) / 2 + 4}" fill="#ff5252" font-size="11">slice i  →  Qᵢ</text>
+    ${mBox(qX, r1y, dk, S, "#ff5252", "Qᵢ", "S", "dₖ")}
+    ${mSym(qX + dk + 30, r1y + S / 2 + 7, "·")}
+    ${mBox(kX, r1y, S, dk, "#4caf50", "Kᵢᵀ", "dₖ", "S")}
+    ${mSym(kX + S + 30, r1y + S / 2 + 7, "=")}
+    ${mBox(aX, r1y, S, S, "#23272f", "Aᵢ", "S", "S")}
+    <text x="${aX + S + 6}" y="${r1y + S / 2 + 4}" fill="#9aa0a6" font-size="11">"scores"  Aᵢ = QᵢKᵢᵀ</text>
+    <line x1="${aX + S / 2}" y1="${r1y + S + 6}" x2="${wX + S / 2}" y2="${r2y - 6}" stroke="#ffd400" stroke-width="1.4" marker-end="url(#ax)"/>
+    <text x="${(aX + S / 2 + wX + S / 2) / 2 + 4}" y="${(r1y + S + r2y) / 2}" fill="#ffd400" font-size="11">softmax( · / √dₖ )</text>
+    ${mBox(wX, r2y, S, S, "#23272f", "wᵢ", "S", "S")}
+    ${wHeatmap}
+    ${mSym(wX + S + 30, r2y + S / 2 + 7, "·")}
+    ${mBox(vX, r2y, dk, S, "#2b6cff", "Vᵢ", "S", "dₖ")}
+    ${mSym(vX + dk + 30, r2y + S / 2 + 7, "=")}
+    ${mBox(oX, r2y, dk, S, "#ff9100", "Attnᵢ", "S", "dₖ")}
+    <text x="${(wX + oX + dk) / 2}" y="${r2y + S + 28}" text-anchor="middle" fill="#9aa0a6" font-size="11">
+      analogous slices: Kᵢ from K, Vᵢ from V (same column-slice index i)
+    </text>
+  </svg>`;
+}
+
+function softmaxDemoSvg() {
+  const scores = [
+    [2.0, 1.5, 0.0, 0.5],
+    [0.5, 2.0, 1.0, 1.2],
+    [-1.0, 0.0, 2.5, 0.5],
+    [0.8, 0.5, 1.0, 1.5],
+  ];
+  const weights = scores.map((row) => {
+    const m = Math.max(...row);
+    const exps = row.map((v) => Math.exp(v - m));
+    const sum = exps.reduce((a, b) => a + b, 0);
+    return exps.map((e) => e / sum);
+  });
+  const cell = 44, n = scores.length;
+  const gridSvg = (x, y, mat, kind) => {
+    let s = "";
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        const v = mat[r][c];
+        let fill;
+        if (kind === "score") {
+          const t = Math.max(-1, Math.min(1, v / 3));
+          fill = t >= 0
+            ? `rgba(255,82,82,${0.12 + t * 0.55})`
+            : `rgba(43,108,255,${0.12 + -t * 0.55})`;
+        } else {
+          fill = `rgba(255,82,82,${0.10 + v * 0.70})`;
+        }
+        s += `<rect x="${x + c * cell}" y="${y + r * cell}" width="${cell}" height="${cell}" fill="${fill}" stroke="#2a2c31" stroke-width="0.5"/>`;
+        const txt = kind === "weight" ? v.toFixed(2) : v.toFixed(1);
+        s += `<text x="${x + c * cell + cell / 2}" y="${y + r * cell + cell / 2 + 4}" text-anchor="middle" fill="#fff" font-size="11" font-weight="500">${txt}</text>`;
+      }
+      if (kind === "weight") {
+        const rs = mat[r].reduce((a, b) => a + b, 0);
+        s += `<text x="${x + n * cell + 10}" y="${y + r * cell + cell / 2 + 4}" fill="#ffd400" font-size="11">Σ = ${rs.toFixed(2)}</text>`;
+      }
+    }
+    for (let c = 0; c < n; c++) {
+      s += `<text x="${x + c * cell + cell / 2}" y="${y - 4}" text-anchor="middle" fill="#9aa0a6" font-size="10">k${c + 1}</text>`;
+    }
+    for (let r = 0; r < n; r++) {
+      s += `<text x="${x - 8}" y="${y + r * cell + cell / 2 + 4}" text-anchor="end" fill="#9aa0a6" font-size="10">q${r + 1}</text>`;
+    }
+    return s;
+  };
+  const sGridX = 50, sGridY = 50, gridW = n * cell;
+  const arrowX1 = sGridX + gridW + 15;
+  const wGridX = arrowX1 + 165;
+  const arrowMidX = (arrowX1 + wGridX - 15) / 2;
+  return `
+  <svg viewBox="0 0 ${wGridX + gridW + 110} 250" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px">
+    <defs>
+      <marker id="sd" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#ffd400"/>
+      </marker>
+    </defs>
+    <text x="${sGridX + gridW / 2}" y="${sGridY - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Aᵢ — raw scores (S = 4 demo)</text>
+    ${gridSvg(sGridX, sGridY, scores, "score")}
+    <line x1="${arrowX1}" y1="${sGridY + gridW / 2}" x2="${wGridX - 18}" y2="${sGridY + gridW / 2}"
+          stroke="#ffd400" stroke-width="1.5" marker-end="url(#sd)"/>
+    <text x="${arrowMidX}" y="${sGridY + gridW / 2 - 12}" text-anchor="middle" fill="#ffd400" font-size="11">softmax (row-wise)</text>
+    <text x="${arrowMidX}" y="${sGridY + gridW / 2 + 18}" text-anchor="middle" fill="#ffd400" font-size="10">wᵢⱼ = e^{Aᵢⱼ} / Σₖ e^{Aᵢₖ}</text>
+    <text x="${wGridX + gridW / 2}" y="${sGridY - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">wᵢ — weights (each row sums to 1)</text>
+    ${gridSvg(wGridX, sGridY, weights, "weight")}
+  </svg>`;
+}
+
+function attnEffectSvg() {
+  const X = [
+    [1.0, 0.0, 1.0, 0.0],
+    [0.0, 1.0, 1.0, 0.0],
+    [1.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 1.0],
+  ];
+  const w = [
+    [0.51, 0.31, 0.07, 0.11],
+    [0.11, 0.49, 0.18, 0.22],
+    [0.024, 0.066, 0.80, 0.108],
+    [0.20, 0.15, 0.25, 0.40],
+  ];
+  const out = w.map((row) => [0, 1, 2, 3].map((j) => row.reduce((acc, wij, k) => acc + wij * X[k][j], 0)));
+  const Xn = X.map((row, i) => row.map((v, j) => v + out[i][j]));
+  const cell = 38, n = 4;
+  const grid = (x, y, mat, kind, hiRow = -1) => {
+    let s = "";
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        const v = mat[r][c];
+        let fill;
+        if (kind === "x") fill = `rgba(180,180,180,${0.15 + v * 0.55})`;
+        else if (kind === "out") fill = `rgba(255,82,82,${0.10 + v * 0.45})`;
+        else fill = `rgba(43,108,255,${0.08 + Math.min(v, 2) * 0.30})`;
+        s += `<rect x="${x + c * cell}" y="${y + r * cell}" width="${cell}" height="${cell}" fill="${fill}" stroke="${r === hiRow ? "#ffd400" : "#2a2c31"}" stroke-width="${r === hiRow ? 1.4 : 0.5}"/>`;
+        s += `<text x="${x + c * cell + cell / 2}" y="${y + r * cell + cell / 2 + 4}" text-anchor="middle" fill="#fff" font-size="11" font-weight="500">${v.toFixed(2)}</text>`;
+      }
+      s += `<text x="${x - 8}" y="${y + r * cell + cell / 2 + 4}" text-anchor="end" fill="#9aa0a6" font-size="10">t${r}</text>`;
+    }
+    return s;
+  };
+  const y = 50, gw = n * cell;
+  const x1 = 50, x2 = x1 + gw + 60, x3 = x2 + gw + 60;
+  return `
+  <svg viewBox="0 0 ${x3 + gw + 80} 260" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px">
+    <text x="${x1 + gw / 2}" y="${y - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">x  (input, S × C demo)</text>
+    <text x="${x1 + gw / 2}" y="${y - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">each row = one token's feature vector</text>
+    ${grid(x1, y, X, "x", 0)}
+    <text x="${(x1 + gw + x2) / 2}" y="${y + gw / 2 + 5}" text-anchor="middle" fill="#cfd2d6" font-size="22">+</text>
+    <text x="${x2 + gw / 2}" y="${y - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">MSA(LN(x))</text>
+    <text x="${x2 + gw / 2}" y="${y - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">= w · V — attention-mixed contribution</text>
+    ${grid(x2, y, out, "out", 0)}
+    <text x="${(x2 + gw + x3) / 2}" y="${y + gw / 2 + 5}" text-anchor="middle" fill="#cfd2d6" font-size="22">=</text>
+    <text x="${x3 + gw / 2}" y="${y - 22}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">x ← x + MSA(LN(x))</text>
+    <text x="${x3 + gw / 2}" y="${y - 8}" text-anchor="middle" fill="#9aa0a6" font-size="10">refined token features</text>
+    ${grid(x3, y, Xn, "new", 0)}
+    <text x="${x1 + gw / 2}" y="${y + gw + 26}" text-anchor="middle" fill="#ffd400" font-size="11">
+      t0 (highlit): [1.00, 0.00, 1.00, 0.00]   →   [1.58, 0.38, 1.93, 0.11]
+    </text>
+    <text x="${x1 + gw / 2}" y="${y + gw + 42}" text-anchor="middle" fill="#9aa0a6" font-size="10">
+      dim 1 was 0 → now 0.38 — information from token 1 (color) leaked into token 0
+    </text>
+  </svg>`;
+}
+
+function eqConcatSvg() {
+  const S = 60, dk = 18, gap = 6;
+  const visible = 4;
+  const cy = 40;
+  let s = "";
+  const startX = 60;
+  const heads = ["Attn₁", "Attn₂", "…", "Attnₕ"];
+  let cur = startX;
+  heads.forEach((name, i) => {
+    if (i === 2) {
+      s += `<text x="${cur + dk / 2}" y="${cy + S / 2 + 6}" text-anchor="middle" fill="#cfd2d6" font-size="20">…</text>`;
+    } else {
+      s += mBox(cur, cy, dk, S, "#ff9100", name, i === 0 ? "S" : "", "dₖ");
+    }
+    cur += dk + gap;
+  });
+  const concatEndX = cur - gap;
+  s += `<path d="M${startX - 4},${cy + S + 8} l0,6 L${concatEndX + 4},${cy + S + 14} l0,-6" stroke="#9aa0a6" fill="none"/>`;
+  s += `<text x="${(startX + concatEndX) / 2}" y="${cy + S + 32}" text-anchor="middle" fill="#9aa0a6" font-size="11">concat on channel axis  →  (S, h·dₖ = C)</text>`;
+  const woX = concatEndX + 60;
+  const woW = 100, woH = 100;
+  const opMidY = cy + S / 2 + 7;
+  s += mSym(concatEndX + 25, opMidY, "·");
+  s += mBox(woX, cy + (S - woH) / 2, woW, woH, "#2b6cff", "Wᴼ", "C", "C");
+  s += mSym(woX + woW + 25, opMidY, "=");
+  const outX = woX + woW + 50;
+  const outW = 130;
+  s += mBox(outX, cy + (S - 30) / 2, outW, 30, "#34373d", "MSA(x)", "S", "C");
+  return `<svg viewBox="0 0 ${outX + outW + 60} 180" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">${s}</svg>`;
+}
+
+function msaDiagramSvg() {
+  const heads = ["head 1", "head 2", "head 3", "…", "head h=16"];
+  const W = 760, H = 500;
+  const box = (x, y, w, h, fill, label, sub = "") => `
+    <g>
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="${fill}" stroke="#2a2c31" />
+      <text x="${x + w / 2}" y="${y + h / 2 - 2}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">${label}</text>
+      ${sub ? `<text x="${x + w / 2}" y="${y + h / 2 + 13}" text-anchor="middle" fill="#9aa0a6" font-size="10">${sub}</text>` : ""}
+    </g>`;
+  const arrow = (x1, y1, x2, y2) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#a)" />`;
+  const headRows = heads.map((name, i) => {
+    const y = 215 + i * 28;
+    return `${box(60, y, 640, 22, i === 3 ? "#101114" : "#1c2434", i === 3 ? "…" : `${name}:  Attn(Q${i + 1}, K${i + 1}, V${i + 1}) = softmax(Q${i + 1}K${i + 1}ᵀ / √d_k) V${i + 1}     →   (S, d_k=64)`)}`;
+  }).join("");
+  const yEnd = 215 + heads.length * 28;
+  return `
+  <svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:6px">
+    <defs>
+      <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#9aa0a6"/>
+      </marker>
+    </defs>
+    ${box(280, 8, 200, 30, "#34373d", "input  x", "(S, C) — one image's tokens")}
+    ${arrow(380, 38, 150, 70)} ${arrow(380, 38, 380, 70)} ${arrow(380, 38, 610, 70)}
+    ${box(60, 70, 180, 32, "#2b6cff", "Q = x W^Q", "(S, C)")}
+    ${box(290, 70, 180, 32, "#2b6cff", "K = x W^K", "(S, C)")}
+    ${box(520, 70, 180, 32, "#2b6cff", "V = x W^V", "(S, C)")}
+    ${arrow(150, 102, 150, 130)} ${arrow(380, 102, 380, 130)} ${arrow(610, 102, 610, 130)}
+    ${box(60, 130, 640, 32, "#23272f", "reshape  →  h = 16 heads, each Q_i, K_i, V_i ∈ ℝ^{S × d_k}     (d_k = C / h = 1024 / 16 = 64)")}
+    ${arrow(380, 162, 380, 210)}
+    ${headRows}
+    ${arrow(380, yEnd, 380, yEnd + 30)}
+    ${box(60, yEnd + 35, 640, 28, "#23272f", "concat heads on channel axis  →  (S, h·d_k = C)")}
+    ${arrow(380, yEnd + 63, 380, yEnd + 93)}
+    ${box(60, yEnd + 98, 640, 28, "#2b6cff", "output  =  (concat) · W^O    ∈  ℝ^{S × C}")}
+  </svg>`;
+}
+
+function mlpDiagramSvg() {
+  const u = 24;
+  const c = 4 * u;
+  const ay = (h) => 70 - h / 2;
+  const box = (x, w, h, fill, label, sub) => `
+    <g>
+      <rect x="${x}" y="${ay(h)}" width="${w}" height="${h}" rx="5" fill="${fill}" stroke="#2a2c31"/>
+      <text x="${x + w / 2}" y="${ay(h) + h + 16}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">${label}</text>
+      <text x="${x + w / 2}" y="${ay(h) + h + 30}" text-anchor="middle" fill="#9aa0a6" font-size="10">${sub}</text>
+    </g>`;
+  const arr = (x) => `<line x1="${x}" y1="70" x2="${x + 30}" y2="70" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#b)" />`;
+  return `
+  <svg viewBox="0 0 760 150" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:10px 6px">
+    <defs>
+      <marker id="b" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#9aa0a6"/>
+      </marker>
+    </defs>
+    ${box(40, 40, c, "#34373d", "x", "ℝ^C   (C = 1024)")}
+    ${arr(80)}
+    ${box(140, 80, c, "#2b6cff", "W₁ x", "ℝ^{4C} (= 4096)")}
+    <text x="220" y="${ay(c) + c + 50}" text-anchor="middle" fill="#cfd2d6" font-size="11">↑ 4× expansion</text>
+    ${arr(280)}
+    ${box(330, 80, c, "#ffd400", "GELU", "elementwise")}
+    ${arr(440)}
+    ${box(490, 80, c, "#2b6cff", "W₂ (·)", "ℝ^C")}
+    ${arr(600)}
+    ${box(650, 40, c, "#34373d", "MLP(x)", "ℝ^C")}
+  </svg>`;
+}
+
+function patchToTokenSvg() {
+  const imgX = 20, imgY = 40, imgW = 150, imgH = 150;
+  const grid = 9;
+  const cell = imgW / grid;
+  let gridLines = "";
+  for (let i = 0; i <= grid; i++) {
+    const o = i * cell;
+    gridLines += `<line x1="${imgX + o}" y1="${imgY}" x2="${imgX + o}" y2="${imgY + imgH}" stroke="#2a2c31" stroke-width="0.5"/>`;
+    gridLines += `<line x1="${imgX}" y1="${imgY + o}" x2="${imgX + imgW}" y2="${imgY + o}" stroke="#2a2c31" stroke-width="0.5"/>`;
+  }
+  const hr = 4, hc = 5;
+  const hl = `<rect x="${imgX + hc * cell}" y="${imgY + hr * cell}" width="${cell}" height="${cell}" fill="#ff5252" opacity="0.75"/>`;
+  const tileX = 230, tileY = 60, tileW = 80;
+  let tile = `<rect x="${tileX}" y="${tileY}" width="${tileW}" height="${tileW}" fill="#ff5252" opacity="0.5"/>`;
+  const sub = 4;
+  for (let i = 0; i <= sub; i++) {
+    const o = (i * tileW) / sub;
+    tile += `<line x1="${tileX + o}" y1="${tileY}" x2="${tileX + o}" y2="${tileY + tileW}" stroke="#2a2c31" stroke-width="0.5"/>`;
+    tile += `<line x1="${tileX}" y1="${tileY + o}" x2="${tileX + tileW}" y2="${tileY + o}" stroke="#2a2c31" stroke-width="0.5"/>`;
+  }
+  return `
+  <svg viewBox="0 0 760 250" width="100%" style="max-width:760px;background:#0d0e10;border-radius:6px;padding:8px">
+    <defs>
+      <marker id="pa" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,8 L8,4 z" fill="#9aa0a6"/>
+      </marker>
+    </defs>
+    <text x="${imgX + imgW / 2}" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">image (3, H, W)</text>
+    <rect x="${imgX}" y="${imgY}" width="${imgW}" height="${imgH}" fill="#1c2434"/>
+    ${gridLines}${hl}
+    <text x="${imgX + imgW / 2}" y="${imgY + imgH + 16}" text-anchor="middle" fill="#9aa0a6" font-size="11">grid of P = (H/14)(W/14) patches</text>
+    <line x1="${imgX + (hc + 1) * cell + 4}" y1="${imgY + (hr + 0.5) * cell}" x2="${tileX - 8}" y2="${tileY + tileW / 2}" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#pa)"/>
+    <text x="${tileX + tileW / 2}" y="${tileY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">one patch — 14×14×3 = 588 values</text>
+    ${tile}
+    <line x1="${tileX + tileW + 4}" y1="${tileY + tileW / 2}" x2="380" y2="${tileY + tileW / 2}" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#pa)"/>
+    <rect x="380" y="${tileY + tileW / 2 - 22}" width="150" height="44" rx="5" fill="#2b6cff" stroke="#2a2c31"/>
+    <text x="455" y="${tileY + tileW / 2 - 4}" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">flatten · Wₚₐₜcₕ</text>
+    <text x="455" y="${tileY + tileW / 2 + 12}" text-anchor="middle" fill="#cfd2d6" font-size="10">Wₚₐₜcₕ ∈ ℝ^{C × 588}</text>
+    <line x1="535" y1="${tileY + tileW / 2}" x2="580" y2="${tileY + tileW / 2}" stroke="#9aa0a6" stroke-width="1.2" marker-end="url(#pa)"/>
+    <text x="595" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">token</text>
+    <rect x="585" y="${imgY}" width="20" height="${imgH}" rx="3" fill="#ff5252" stroke="#2a2c31"/>
+    <text x="595" y="${imgY + imgH + 16}" text-anchor="middle" fill="#9aa0a6" font-size="11">ℝ^C, C=1024</text>
+    <text x="623" y="${tileY + tileW / 2 + 5}" fill="#cfd2d6" font-size="16">+</text>
+    <text x="660" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">pos embed</text>
+    <rect x="650" y="${imgY}" width="20" height="${imgH}" rx="3" fill="#34373d" stroke="#2a2c31"/>
+    <text x="685" y="${tileY + tileW / 2 + 5}" fill="#cfd2d6" font-size="16">=</text>
+    <text x="725" y="${imgY - 8}" text-anchor="middle" fill="#9aa0a6" font-size="11">patch token</text>
+    <rect x="715" y="${imgY}" width="20" height="${imgH}" rx="3" fill="#1b5fff" stroke="#2a2c31"/>
+  </svg>`;
+}
+
+document.getElementById('d-patchToken').innerHTML = patchToTokenSvg();
+document.getElementById('d-tokenLayout').innerHTML = tokenLayoutSvg();
+document.getElementById('d-maskFrame').innerHTML = attentionMaskSvg('frame');
+document.getElementById('d-maskGlobal').innerHTML = attentionMaskSvg('global');
+document.getElementById('d-eqProj').innerHTML = eqProjSvg();
+document.getElementById('d-indexClarify').innerHTML = indexClarifySvg();
+document.getElementById('d-eqAttn').innerHTML = eqAttnSvg();
+document.getElementById('d-softmaxDemo').innerHTML = softmaxDemoSvg();
+document.getElementById('d-attnEffect').innerHTML = attnEffectSvg();
+document.getElementById('d-eqConcat').innerHTML = eqConcatSvg();
+document.getElementById('d-msaDiagram').innerHTML = msaDiagramSvg();
+document.getElementById('d-mlpDiagram').innerHTML = mlpDiagramSvg();
+</script>
+
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+        onload='renderMathInElement(document.body, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "$",  right: "$",  display: false }
+          ],
+          throwOnError: false
+        });'></script>
+
+</body>
+</html>

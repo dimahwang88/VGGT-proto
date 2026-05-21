@@ -59,12 +59,47 @@ const ARCH = {
 
   patch: {
     t: "Tokenization (DINOv2 ViT-L/14 + special tokens)",
-    h: `<p><b>1. Patch embedding.</b> A single conv strides over the image:</p>
+    h: `<p><b style="color:#ffd400">Common misconception — DINOv2 is initialization,
+       not a separate stage.</b> VGGT does <i>not</i> "run DINOv2 first, then run its
+       own model". The pretrained DINOv2 weights are <b>copied into</b> VGGT's
+       patch-embedding conv (and the early aggregator transformer layers); VGGT
+       then keeps training those parameters with its own multi-task loss. At
+       inference there is one network — its patch-embed weights happen to
+       <i>originate</i> from DINOv2.</p>
+    <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:8px 0;font-size:13px">
+      <b>"Pretrained" ≠ "frozen" ≠ "fixed" — three distinct ideas</b>
+      <table style="border-collapse:collapse;font-size:12px;margin-top:6px">
+        <tr><th style="text-align:left;padding:3px 12px 3px 0">term</th>
+            <th style="text-align:left;padding:3px 12px 3px 0">meaning</th>
+            <th style="text-align:left;padding:3px 0">applies to VGGT's patch embed?</th></tr>
+        <tr><td style="padding:3px 12px 3px 0">pretrained</td>
+            <td style="padding:3px 12px 3px 0">initialized from weights learned on a previous task (here: DINOv2's self-supervised objective)</td>
+            <td style="padding:3px 0;color:#9ad">✓ yes</td></tr>
+        <tr><td style="padding:3px 12px 3px 0">frozen</td>
+            <td style="padding:3px 12px 3px 0">weights don't update during the current task's training (no gradient flow)</td>
+            <td style="padding:3px 0;color:#9ad">✗ no — VGGT fine-tunes end-to-end</td></tr>
+        <tr><td style="padding:3px 12px 3px 0">fixed</td>
+            <td style="padding:3px 12px 3px 0">doesn't change at all, ever</td>
+            <td style="padding:3px 0;color:#9ad">✗ no (except trivially at inference, like every weight)</td></tr>
+      </table>
+      <p style="margin:6px 0 0">So the patch-embedding conv is <b>a learnable
+        transformation, pretrained on DINOv2, then fine-tuned end-to-end with
+        VGGT's multi-task loss</b>. At inference of course all weights are
+        static — but that's true of every parameter, not something special
+        about the patch embed.</p>
+      <p style="margin:6px 0 0;color:#cfd2d6">
+        (Aside: some recipes <i>do</i> freeze the backbone — called "linear
+        probing" or "partial freezing". VGGT's paper doesn't suggest that;
+        standard interpretation is full end-to-end fine-tuning.)
+      </p>
+    </div>
+    <p><b>1. Patch embedding.</b> A single conv strides over the image:</p>
     ${kx(String.raw`\text{PatchEmbed}: \;\text{Conv2d}(3\to C,\;k=14,\;s=14),\quad C\approx 1024`)}
-    <p>so an image (3, H, W) becomes patch tokens
-    ${kx(String.raw`\big(\tfrac{H}{14}\!\cdot\!\tfrac{W}{14}=P,\;C\big)`, false)}.
-    Weights init from <b>DINOv2 ViT-L/14</b> (self-supervised, registers
-    variant).</p>
+    <p>so an image (3, H, W) becomes ${kx(String.raw`P=(H/14)(W/14)`, false)}
+    <b>patch tokens</b> of dim ${kx(String.raw`C`, false)}. Weights init from
+    <b>DINOv2 ViT-L/14</b> (self-supervised, registers variant). The image alone
+    therefore produces ${kx(String.raw`P`, false)} tokens — <b>not the full
+    ${kx(String.raw`S`, false)}</b>; the next step prepends 5 more.</p>
     <p><b>2. Special tokens (per image).</b> The aggregator prepends learned
     tokens to every image:</p>
     <ul>
@@ -86,7 +121,15 @@ const ARCH = {
 
   agg: {
     t: "Alternating-Attention Aggregator (the engine)",
-    h: `<p><b>Refresher — pre-LN transformer block:</b></p>
+    h: `<p><b style="color:#ffd400">Common misconception — each AA block has TWO
+       sub-blocks, not one.</b> A standard transformer block has one (MSA + MLP).
+       A <b>VGGT AA block</b> has <b>two such sub-blocks back-to-back</b>: a
+       frame-wise (MSA + MLP) and a global (MSA + MLP). So
+       ${kx(String.raw`L\!\approx\!24`, false)} AA blocks contain
+       <b>48 MSAs and 48 MLPs total</b>. "Alternating" refers to this
+       within-block alternation (frame ↔ global), not to alternation across the
+       ${kx(String.raw`L`, false)} blocks.</p>
+    <p><b>Refresher — pre-LN transformer block:</b></p>
     ${kx(String.raw`\begin{aligned}
        \mathbf{x} &\leftarrow \mathbf{x} + \mathrm{MSA}(\mathrm{LN}(\mathbf{x}))\\
        \mathbf{x} &\leftarrow \mathbf{x} + \mathrm{MLP}(\mathrm{LN}(\mathbf{x}))
@@ -242,6 +285,75 @@ window.__vggtArch = (key) => {
   const n = ARCH[key];
   if (n) $("archInfo").innerHTML = `<h4 style="margin:.2em 0">${n.t}</h4>${n.h}`;
 };
+
+// Parameter budget — what trains where in VGGT-1B. Approximate numbers
+// (configurations vary across checkpoints); verify on the pod.
+function paramBudgetHtml() {
+  const row = (comp, par, init, dinov2) => `
+    <tr>
+      <td style="padding:4px 10px;border:1px solid #2a2c31">${comp}</td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31;color:#9ad">${par}</td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31">${init}</td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31;text-align:center">${dinov2}</td>
+    </tr>`;
+  return `
+  <h3 style="margin:18px 0 6px">Parameter budget — where ~1B trainable params come from</h3>
+  <p>Approximate breakdown for the public VGGT-1B checkpoint. All parameters
+     are <b>trainable</b> end-to-end during VGGT training — the "Init source"
+     column tells you only <i>where the initial values came from</i>. Exact
+     numbers depend on checkpoint configuration; verify with the snippet
+     below.</p>
+  <table style="border-collapse:collapse;font-size:12px;width:100%">
+    <thead>
+      <tr style="background:#1c1e22">
+        <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">Component</th>
+        <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">~Params</th>
+        <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">Init source</th>
+        <th style="text-align:center;padding:4px 10px;border:1px solid #2a2c31">From DINOv2?</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${row("Patch embedding conv  (Conv2d 3→C, k=s=14)", "~0.6 M", "DINOv2 ViT-L/14", "✓")}
+      ${row("Per-patch positional embeddings", "~1.4 M", "DINOv2", "✓")}
+      ${row("Camera token  (1 learnable vector per image)", "~1 K", "random — VGGT-specific", "—")}
+      ${row("Register tokens  (4 learnable vectors per image)", "~4 K", "DINOv2 with-registers variant", "✓")}
+      ${row("Aggregator — <b>frame-wise</b> sub-blocks  (24 × ViT-L block: LN, MSA(4C²), MLP(8C²))", "~302 M", "DINOv2 ViT-L/14 transformer blocks", "✓")}
+      ${row("Aggregator — <b>global</b> sub-blocks  (24 × same structure, but new for multi-view)", "~302 M", "random — VGGT-specific", "—")}
+      ${row("Camera head  (cross-view trunk + 9-D regressor, T=4 unrolled passes)", "~10–30 M", "random — VGGT-specific", "—")}
+      ${row("DPT depth head  (reassemble + RefineNet fusion)", "~80–120 M", "random — VGGT-specific", "—")}
+      ${row("DPT point head  (same DPT structure)", "~80–120 M", "random — VGGT-specific", "—")}
+      ${row("Track head  (CoTracker-style iterative)", "~50–100 M", "random — VGGT-specific", "—")}
+      ${row("Final LayerNorms, biases, misc.", "~0.1 M", "various", "—")}
+      <tr style="background:#1c1e22">
+        <th style="text-align:left;padding:5px 10px;border:1px solid #2a2c31">Total (VGGT-1B)</th>
+        <th style="text-align:left;padding:5px 10px;border:1px solid #2a2c31;color:#9ad">≈ 1.0 B</th>
+        <th style="text-align:left;padding:5px 10px;border:1px solid #2a2c31">≈ 304 M DINOv2  +  ≈ 700 M random</th>
+        <th style="text-align:center;padding:5px 10px;border:1px solid #2a2c31"></th>
+      </tr>
+    </tbody>
+  </table>
+  <p class="hint" style="margin-top:8px">
+    Roughly <b>30 % of VGGT's params come from DINOv2</b> — the patch
+    embedding, positional embeddings, register tokens, and the 24 frame-wise
+    transformer sub-blocks of the aggregator. The remaining <b>~70 % are
+    random-initialized VGGT-original</b>: the global sub-blocks (new for
+    multi-view fusion) and the four heads. All of it then trains end-to-end.
+  </p>
+  <h5 style="margin:12px 0 4px">Verify the real numbers on the pod</h5>
+  <pre style="background:#0d0e10;padding:8px;border-radius:4px;font-size:12px;line-height:1.4;color:#cfd2d6;overflow-x:auto">
+from backend.vggt_runner import get_model
+m = get_model()
+
+total     = sum(p.numel() for p in m.parameters())
+trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
+print(f"Total: {total/1e6:.1f} M   Trainable: {trainable/1e6:.1f} M")
+
+# Per-top-level-module breakdown
+for name, mod in m.named_children():
+    n = sum(p.numel() for p in mod.parameters())
+    print(f"  {name:&lt;14s} {n/1e6:7.1f} M")
+</pre>`;
+}
 
 // --- Geometry math (with refreshers) ---------------------------------------
 function geomHtml() {
@@ -1583,6 +1695,7 @@ export async function initLearn(state, viewer) {
 
     $("geomMath").innerHTML = geomHtml();
     $("trainNotes").innerHTML = trainHtml();
+    $("archParams").innerHTML = paramBudgetHtml();
     renderAnatomy();
 
     mixChart = new Chart($("dataMix"), {
