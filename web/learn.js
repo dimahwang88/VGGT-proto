@@ -966,6 +966,47 @@ function msaDiagramSvg() {
 }
 
 // SVG of the MLP / FFN: per-token C -> 4C -> GELU -> C bottleneck.
+// Plot of GELU vs ReLU over x ∈ [-3, 3], inline SVG.
+function geluVsReluSvg() {
+  const W = 480, H = 200, padL = 40, padR = 16, padT = 16, padB = 28;
+  const xMin = -3, xMax = 3, yMin = -0.5, yMax = 3;
+  const xPx = (x) => padL + ((x - xMin) / (xMax - xMin)) * (W - padL - padR);
+  const yPx = (y) => H - padB - ((y - yMin) / (yMax - yMin)) * (H - padT - padB);
+  const gelu = (x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)));
+  const relu = (x) => Math.max(0, x);
+  const path = (fn) => {
+    let d = "";
+    for (let i = 0; i <= 200; i++) {
+      const x = xMin + (i / 200) * (xMax - xMin);
+      d += (i === 0 ? "M" : "L") + xPx(x).toFixed(1) + "," + yPx(fn(x)).toFixed(1) + " ";
+    }
+    return d;
+  };
+  let grid = "";
+  for (let x = xMin; x <= xMax; x++) {
+    if (x === 0) continue;
+    const p = xPx(x);
+    grid += `<line x1="${p}" y1="${padT}" x2="${p}" y2="${H - padB}" stroke="#1c1e22" stroke-width="0.5"/>`;
+    grid += `<text x="${p}" y="${H - padB + 14}" fill="#9aa0a6" font-size="10" text-anchor="middle">${x}</text>`;
+  }
+  for (let y = 0; y <= 3; y++) {
+    const p = yPx(y);
+    grid += `<line x1="${padL}" y1="${p}" x2="${W - padR}" y2="${p}" stroke="#1c1e22" stroke-width="0.5"/>`;
+    grid += `<text x="${padL - 4}" y="${p + 4}" fill="#9aa0a6" font-size="10" text-anchor="end">${y}</text>`;
+  }
+  return `
+  <svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:480px;background:#0d0e10;border-radius:6px;padding:6px">
+    ${grid}
+    <line x1="${padL}" y1="${yPx(0)}" x2="${W - padR}" y2="${yPx(0)}" stroke="#9aa0a6" stroke-width="0.8"/>
+    <line x1="${xPx(0)}" y1="${padT}" x2="${xPx(0)}" y2="${H - padB}" stroke="#9aa0a6" stroke-width="0.8"/>
+    <text x="${W - padR - 4}" y="${yPx(0) - 4}" fill="#9aa0a6" font-size="10" text-anchor="end">x</text>
+    <path d="${path(relu)}" stroke="#ff5252" stroke-width="2" fill="none"/>
+    <path d="${path(gelu)}" stroke="#2b6cff" stroke-width="2" fill="none"/>
+    <text x="${W - padR - 10}" y="36" fill="#ff5252" font-size="11" text-anchor="end">ReLU(x) = max(0, x)</text>
+    <text x="${W - padR - 10}" y="52" fill="#2b6cff" font-size="11" text-anchor="end">GELU(x) = x · Φ(x)</text>
+  </svg>`;
+}
+
 function mlpDiagramSvg() {
   const u = 24;
   const c = 4 * u; // bar height ∝ width
@@ -1467,8 +1508,55 @@ function renderAnatomy() {
   ${mlpDiagramSvg()}
   <p class="hint">Roughly two-thirds of a transformer block's parameters live
      in this expansion (${kx(String.raw`2\!\cdot\!C\!\cdot\!4C=8C^2`, false)} for MLP
-     vs ${kx(String.raw`4C^2`, false)} for Q,K,V,W^O combined). GELU adds a
-     smooth gating non-linearity that empirically beats ReLU for transformers.</p>
+     vs ${kx(String.raw`4C^2`, false)} for Q,K,V,W^O combined).</p>
+
+  <h5 style="margin:14px 0 4px">GELU vs ReLU — and why every modern transformer picks GELU</h5>
+  <p><b>GELU (Gaussian Error Linear Unit)</b>, Hendrycks &amp; Gimpel 2016:</p>
+  ${kx(String.raw`\mathrm{GELU}(x) = x\cdot\Phi(x) = x\cdot\tfrac{1}{2}\!\left[1+\mathrm{erf}\!\left(\tfrac{x}{\sqrt 2}\right)\right]`)}
+  <p>where ${kx(String.raw`\Phi(x)`, false)} is the cumulative density of the
+     standard normal. In practice almost everyone uses the cheap tanh-based
+     approximation:</p>
+  ${kx(String.raw`\mathrm{GELU}(x)\;\approx\;0.5\,x\,\Big[1+\tanh\!\Big(\sqrt{\tfrac{2}{\pi}}\big(x+0.044715\,x^{3}\big)\Big)\Big]\;\approx\;x\cdot\sigma(1.702\,x)`)}
+  <p>Visually:</p>
+  ${geluVsReluSvg()}
+
+  <p><b>Why GELU beats ReLU</b> (for transformers specifically):</p>
+  <div style="background:#1c2434;border-left:3px solid #2b6cff;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>1 — Smooth and differentiable everywhere.</b> ReLU has a hard kink at
+    ${kx(String.raw`x=0`, false)} where the derivative jumps from 0 to 1.
+    That non-smoothness makes optimization landscapes rougher and second-order
+    info noisier. GELU is ${kx(String.raw`C^{\infty}`, false)}-smooth — better
+    behaved for the optimizers (AdamW, LAMB) and for any layer-norm /
+    initialization analysis that assumes smoothness.
+  </div>
+  <div style="background:#1c2434;border-left:3px solid #ffd400;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>2 — No "dying ReLU".</b> When a ReLU unit's input is consistently
+    negative, ${kx(String.raw`\mathrm{ReLU}'(x)=0`, false)} → no gradient → the
+    neuron stops learning forever ("dead neuron"). GELU has small <i>non-zero</i>
+    output and gradient for negative inputs (especially around
+    ${kx(String.raw`x\!\approx\!-1`, false)}), so units recover.
+  </div>
+  <div style="background:#1c2434;border-left:3px solid #ff5252;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>3 — Stochastic gating without stochasticity.</b> The probabilistic
+    reading: ${kx(String.raw`\mathrm{GELU}(x) = \mathbb{E}_{m\sim\mathrm{Bernoulli}(\Phi(x))}[m\cdot x]`, false)}.
+    GELU is the <i>expected</i> output of "randomly keep ${kx(String.raw`x`, false)}
+    with probability ${kx(String.raw`\Phi(x)`, false)} (its percentile rank in a
+    standard normal), else drop it to zero." So it's a deterministic activation
+    that <b>bakes in a soft data-dependent dropout</b>. Empirically this acts
+    as a regularizer and helps generalization.
+  </div>
+  <div style="background:#1c2434;border-left:3px solid #ff9100;padding:10px 14px;border-radius:4px;margin:6px 0;font-size:13px">
+    <b>4 — Negative dip ≈ subtle inhibition.</b> Notice the small <i>negative</i>
+    GELU values for ${kx(String.raw`x\in[-1.5,0]`, false)} (visible in the
+    plot). The activation can push a token's feature slightly negative — a
+    form of "soft inhibition" that ReLU literally cannot represent.
+    Empirically this small expressivity bump matters at scale.
+  </div>
+  <p class="hint">Adopted by BERT, GPT-2/3/4, ViT, DINOv2 — basically every
+     modern transformer — after Hendrycks &amp; Gimpel's NLP benchmark and
+     follow-ups showed consistent (small but real) gains over ReLU and ELU.
+     The cost over ReLU is one extra <code>tanh</code> per activation, which
+     CUDA buries.</p>
 
   <h5 style="margin:12px 0 4px">What is the MLP actually <i>for</i>? (intuition)</h5>
   <p>If MSA is the <b>communication</b> step ("look around, gather info"), the
@@ -1504,6 +1592,64 @@ function renderAnatomy() {
      rounds of "look around, then think" — gathering context from across
      frames and refining it through 24 layers of non-linear feature
      construction.</p>
+
+  <h5 style="margin:14px 0 4px">MLP parallelism — what "token-wise" actually means</h5>
+  <p>The MLP is the <b>one place</b> in a transformer block where tokens are
+     processed <b>fully in parallel and independently</b>. Given input
+     ${kx(String.raw`X\in\mathbb{R}^{S\times C}`, false)}, for each token
+     ${kx(String.raw`\mathbf{x}_s`, false)} independently:</p>
+  ${kx(String.raw`\mathbf{y}_s = W_2\,\mathrm{GELU}(W_1\mathbf{x}_s+b_1)+b_2,\quad s=1,\dots,S`)}
+  <p>Note the absence of any ${kx(String.raw`s`, false)} index on the weights
+     — the <i>same</i> ${kx(String.raw`W_1,W_2`, false)} are applied to every
+     token. Token 1's output depends only on token 1's input.
+     <b>There is no cross-token interaction at all.</b></p>
+  <p>In code it's not a Python loop over tokens — it's literally a single big
+     matmul:</p>
+  <pre style="background:#0d0e10;padding:8px;border-radius:4px;font-size:12px;line-height:1.4;color:#cfd2d6;overflow-x:auto">
+# X has shape (S, C)  — or after a frame-wise reshape, (B*N, S, C)
+H = (X @ W1.T).gelu()      # (S, 4C)  one matmul, all S tokens at once
+Y = H @ W2.T               # (S, C)   one matmul, all S tokens at once
+</pre>
+  <p>CUDA cores process every row (every token) in parallel — that's where
+     the throughput comes from. After the frame-wise reshape to
+     ${kx(String.raw`(B\!\cdot\!N,\,S,\,C)`, false)}, all
+     ${kx(String.raw`B\!\cdot\!N\!\cdot\!S`, false)} tokens flow through the
+     MLP in one tensor op.</p>
+
+  <h6 style="margin:10px 0 4px;color:#cfd2d6">Contrast with attention</h6>
+  <table style="border-collapse:collapse;font-size:12px;margin-top:4px">
+    <tr style="background:#1c1e22">
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31"></th>
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">per-token (no info flow)?</th>
+      <th style="text-align:left;padding:4px 10px;border:1px solid #2a2c31">parallel?</th>
+    </tr>
+    <tr>
+      <td style="padding:4px 10px;border:1px solid #2a2c31"><b>MSA</b></td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31">No — each token's output depends on <i>every</i> other token through ${kx(String.raw`Q\!\cdot\!K^\top`, false)}</td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31">Yes, but with explicit ${kx(String.raw`S\!\times\!S`, false)} interaction</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 10px;border:1px solid #2a2c31"><b>MLP</b></td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31"><b>Yes</b> — each token transformed in isolation</td>
+      <td style="padding:4px 10px;border:1px solid #2a2c31">Yes — embarrassingly so; just ${kx(String.raw`S`, false)} independent function applications batched into one matmul</td>
+    </tr>
+  </table>
+
+  <p class="hint" style="margin-top:8px"><b>Why this clean split matters.</b>
+     <b>Attention = communication</b> (cross-token information flow,
+     parameterized by ${kx(String.raw`W^Q,W^K,W^V,W^O`, false)}).
+     <b>MLP = computation</b> (per-token non-linear processing, parameterized
+     by ${kx(String.raw`W_1,W_2`, false)}). If the MLP also mixed tokens,
+     you'd have two cross-token operations per block — redundant and harder
+     to interpret. If attention also did non-linear feature transformation,
+     you'd lose the clean separation. The split is half of why transformers
+     work so well.</p>
+  <p class="hint">One subtle consequence: the MLP behaves <b>identically</b>
+     in the frame-wise and global sub-blocks, because the reshape from
+     ${kx(String.raw`(B\!\cdot\!N,S,C)`, false)} to
+     ${kx(String.raw`(B,N\!\cdot\!S,C)`, false)} doesn't affect a per-token
+     operation. The "frame-wise vs global" distinction is purely about
+     <i>attention</i> — the only layer that does cross-token computation.</p>
 
   <h4 style="margin:18px 0 6px">One patch → one token (the 1-to-1 mapping)</h4>
   <p>The image is tiled by the patch-embed conv (kernel = stride = 14) into

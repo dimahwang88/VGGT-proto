@@ -793,7 +793,55 @@ $$\mathrm{MLP}(x)=W_2\,\mathrm{GELU}(W_1 x),\qquad W_1\in\mathbb{R}^{4C\times C}
 <div class="diag" id="d-mlpDiagram"></div>
 <p class="hint">Roughly two-thirds of a transformer block's parameters live
 in this expansion ($2\cdot C\cdot 4C = 8C^2$ for MLP vs $4C^2$ for $Q,K,V,W^O$
-combined). GELU empirically beats ReLU for transformers.</p>
+combined).</p>
+
+<h4>GELU vs ReLU — and why every modern transformer picks GELU</h4>
+<p><strong>GELU (Gaussian Error Linear Unit)</strong>, Hendrycks &amp;
+Gimpel 2016:</p>
+$$\mathrm{GELU}(x) = x\cdot\Phi(x) = x\cdot\tfrac{1}{2}\!\left[1+\mathrm{erf}\!\left(\tfrac{x}{\sqrt 2}\right)\right]$$
+<p>where $\Phi(x)$ is the cumulative density of the standard normal. In
+practice almost everyone uses the cheap tanh-based approximation:</p>
+$$\mathrm{GELU}(x)\;\approx\;0.5\,x\,\Big[1+\tanh\!\Big(\sqrt{\tfrac{2}{\pi}}\big(x+0.044715\,x^{3}\big)\Big)\Big]\;\approx\;x\cdot\sigma(1.702\,x)$$
+<p>Visually:</p>
+<div class="diag" id="d-geluVsRelu"></div>
+
+<p><strong>Why GELU beats ReLU</strong> (for transformers specifically):</p>
+<div class="callout">
+  <strong>1 — Smooth and differentiable everywhere.</strong> ReLU has a hard
+  kink at $x=0$ where the derivative jumps from 0 to 1. That non-smoothness
+  makes optimization landscapes rougher and second-order info noisier. GELU
+  is $C^{\infty}$-smooth — better behaved for the optimizers (AdamW, LAMB)
+  and for any layer-norm / initialization analysis that assumes smoothness.
+</div>
+<div class="callout callout-y">
+  <strong>2 — No "dying ReLU".</strong> When a ReLU unit's input is
+  consistently negative, $\mathrm{ReLU}'(x)=0$ → no gradient → the neuron
+  stops learning forever ("dead neuron"). GELU has small <em>non-zero</em>
+  output and gradient for negative inputs (especially around $x\approx-1$),
+  so units recover.
+</div>
+<div class="callout callout-r">
+  <strong>3 — Stochastic gating without stochasticity.</strong> The
+  probabilistic reading:
+  $\mathrm{GELU}(x) = \mathbb{E}_{m\sim\mathrm{Bernoulli}(\Phi(x))}[m\cdot x]$.
+  GELU is the <em>expected</em> output of "randomly keep $x$ with probability
+  $\Phi(x)$ (its percentile rank in a standard normal), else drop it to
+  zero." So it's a deterministic activation that <strong>bakes in a soft
+  data-dependent dropout</strong>. Empirically this acts as a regularizer and
+  helps generalization.
+</div>
+<div class="callout callout-o">
+  <strong>4 — Negative dip ≈ subtle inhibition.</strong> Notice the small
+  <em>negative</em> GELU values for $x\in[-1.5,0]$ (visible in the plot).
+  The activation can push a token's feature slightly negative — a form of
+  "soft inhibition" that ReLU literally cannot represent. Empirically this
+  small expressivity bump matters at scale.
+</div>
+<p class="hint">Adopted by BERT, GPT-2/3/4, ViT, DINOv2 — basically every
+modern transformer — after Hendrycks &amp; Gimpel's NLP benchmark and
+follow-ups showed consistent (small but real) gains over ReLU and ELU. The
+cost over ReLU is one extra <code>tanh</code> per activation, which CUDA
+buries.</p>
 
 <h4>What is the MLP actually for? (intuition)</h4>
 <p>If MSA is the <strong>communication</strong> step ("look around, gather
@@ -824,6 +872,54 @@ something with what you gathered").</p>
 (MLP) → pass to next block. After 24 of these, every patch has had 24 rounds
 of "look around, then think" — gathering context from across frames and
 refining it through 24 layers of non-linear feature construction.</p>
+
+<h4>MLP parallelism — what "token-wise" actually means</h4>
+<p>The MLP is the <strong>one place</strong> in a transformer block where
+tokens are processed <strong>fully in parallel and independently</strong>.
+Given input $X\in\mathbb{R}^{S\times C}$, for each token $\mathbf{x}_s$
+independently:</p>
+$$\mathbf{y}_s = W_2\,\mathrm{GELU}(W_1\mathbf{x}_s + b_1) + b_2,\quad s = 1,\dots,S.$$
+<p>Note the absence of any $s$ index on the weights — the <em>same</em>
+$W_1, W_2$ are applied to every token. Token 1's output depends only on
+token 1's input. <strong>There is no cross-token interaction at all.</strong></p>
+<p>In code it's not a Python loop — it's literally one big matmul:</p>
+<pre>
+# X has shape (S, C)  — or after a frame-wise reshape, (B*N, S, C)
+H = (X @ W1.T).gelu()      # (S, 4C)  one matmul, all S tokens at once
+Y = H @ W2.T               # (S, C)   one matmul, all S tokens at once
+</pre>
+<p>CUDA cores process every row (every token) in parallel — that's where the
+throughput comes from. After the frame-wise reshape to $(B\!\cdot\!N, S, C)$,
+all $B\!\cdot\!N\!\cdot\!S$ tokens flow through the MLP in one tensor op.</p>
+
+<h5>Contrast with attention</h5>
+<table>
+  <tr><th></th><th>per-token (no info flow)?</th><th>parallel?</th></tr>
+  <tr>
+    <td><strong>MSA</strong></td>
+    <td>No — each token's output depends on <em>every</em> other token through $Q\!\cdot\!K^\top$</td>
+    <td>Yes, but with explicit $S\!\times\!S$ interaction</td>
+  </tr>
+  <tr>
+    <td><strong>MLP</strong></td>
+    <td><strong>Yes</strong> — each token transformed in isolation</td>
+    <td>Yes — embarrassingly so; just $S$ independent function applications batched into one matmul</td>
+  </tr>
+</table>
+
+<p class="hint"><strong>Why this clean split matters.</strong> <strong>Attention
+= communication</strong> (cross-token information flow, parameterized by
+$W^Q, W^K, W^V, W^O$). <strong>MLP = computation</strong> (per-token
+non-linear processing, parameterized by $W_1, W_2$). If the MLP also mixed
+tokens, you'd have two cross-token operations per block — redundant and
+harder to interpret. If attention also did non-linear feature transformation,
+you'd lose the clean separation. The split is half of why transformers work
+so well.</p>
+<p class="hint">One subtle consequence: the MLP behaves <strong>identically</strong>
+in the frame-wise and global sub-blocks, because the reshape from
+$(B\!\cdot\!N, S, C)$ to $(B, N\!\cdot\!S, C)$ doesn't affect a per-token
+operation. The "frame-wise vs global" distinction is purely about
+<em>attention</em> — the only layer that does cross-token computation.</p>
 
 
 <!-- =================================================================== -->
@@ -1275,6 +1371,46 @@ function msaDiagramSvg() {
   </svg>`;
 }
 
+function geluVsReluSvg() {
+  const W = 480, H = 200, padL = 40, padR = 16, padT = 16, padB = 28;
+  const xMin = -3, xMax = 3, yMin = -0.5, yMax = 3;
+  const xPx = (x) => padL + ((x - xMin) / (xMax - xMin)) * (W - padL - padR);
+  const yPx = (y) => H - padB - ((y - yMin) / (yMax - yMin)) * (H - padT - padB);
+  const gelu = (x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)));
+  const relu = (x) => Math.max(0, x);
+  const path = (fn) => {
+    let d = "";
+    for (let i = 0; i <= 200; i++) {
+      const x = xMin + (i / 200) * (xMax - xMin);
+      d += (i === 0 ? "M" : "L") + xPx(x).toFixed(1) + "," + yPx(fn(x)).toFixed(1) + " ";
+    }
+    return d;
+  };
+  let grid = "";
+  for (let x = xMin; x <= xMax; x++) {
+    if (x === 0) continue;
+    const p = xPx(x);
+    grid += `<line x1="${p}" y1="${padT}" x2="${p}" y2="${H - padB}" stroke="#1c1e22" stroke-width="0.5"/>`;
+    grid += `<text x="${p}" y="${H - padB + 14}" fill="#9aa0a6" font-size="10" text-anchor="middle">${x}</text>`;
+  }
+  for (let y = 0; y <= 3; y++) {
+    const p = yPx(y);
+    grid += `<line x1="${padL}" y1="${p}" x2="${W - padR}" y2="${p}" stroke="#1c1e22" stroke-width="0.5"/>`;
+    grid += `<text x="${padL - 4}" y="${p + 4}" fill="#9aa0a6" font-size="10" text-anchor="end">${y}</text>`;
+  }
+  return `
+  <svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:480px;background:#0d0e10;border-radius:6px;padding:6px">
+    ${grid}
+    <line x1="${padL}" y1="${yPx(0)}" x2="${W - padR}" y2="${yPx(0)}" stroke="#9aa0a6" stroke-width="0.8"/>
+    <line x1="${xPx(0)}" y1="${padT}" x2="${xPx(0)}" y2="${H - padB}" stroke="#9aa0a6" stroke-width="0.8"/>
+    <text x="${W - padR - 4}" y="${yPx(0) - 4}" fill="#9aa0a6" font-size="10" text-anchor="end">x</text>
+    <path d="${path(relu)}" stroke="#ff5252" stroke-width="2" fill="none"/>
+    <path d="${path(gelu)}" stroke="#2b6cff" stroke-width="2" fill="none"/>
+    <text x="${W - padR - 10}" y="36" fill="#ff5252" font-size="11" text-anchor="end">ReLU(x) = max(0, x)</text>
+    <text x="${W - padR - 10}" y="52" fill="#2b6cff" font-size="11" text-anchor="end">GELU(x) = x · Φ(x)</text>
+  </svg>`;
+}
+
 function mlpDiagramSvg() {
   const u = 24;
   const c = 4 * u;
@@ -1369,6 +1505,7 @@ document.getElementById('d-attnEffect').innerHTML = attnEffectSvg();
 document.getElementById('d-eqConcat').innerHTML = eqConcatSvg();
 document.getElementById('d-msaDiagram').innerHTML = msaDiagramSvg();
 document.getElementById('d-mlpDiagram').innerHTML = mlpDiagramSvg();
+document.getElementById('d-geluVsRelu').innerHTML = geluVsReluSvg();
 </script>
 
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
